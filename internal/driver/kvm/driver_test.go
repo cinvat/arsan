@@ -64,3 +64,15 @@ func TestUsageMath(t *testing.T) {
 		t.Fatalf("used = %d GiB, want 4", used)
 	}
 }
+
+func TestParseNodeinfoCPUs(t *testing.T) {
+	out := "CPU model:           x86_64\nCPU(s):              8\n"
+	if got := parseNodeinfoCPUs(out); got != 8 {
+		t.Fatalf("got %d, want 8", got)
+	}
+	for _, bad := range []string{"", "CPU(s): none", "CPU(s): 0"} {
+		if got := parseNodeinfoCPUs(bad); got != 0 {
+			t.Fatalf("input %q: got %d, want 0", bad, got)
+		}
+	}
+}

@@ -13,7 +13,6 @@ import (
 	"github.com/cinvat/arsan/internal/agent"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/internal/driver"
-	"github.com/cinvat/arsan/internal/driver/fake"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
@@ -49,18 +48,23 @@ var agentCmd = &cobra.Command{
 		}
 
 		total := core.Resources{VCPU: vcpu, RAM: ram, Disk: disk}
-		var drv core.Driver
-		switch driverName {
-		case "fake":
-			drv = fake.New()
-		case "kvm":
-			d, err := driver.New("kvm")
-			if err != nil {
-				return err
+		drv, err := driver.New(driverName)
+		if err != nil {
+			return err
+		}
+		// An engine that knows its host reports capacity itself; hand-declared
+		// numbers would be a second copy of facts libvirt already holds. The
+		// flags remain for engines with nothing to detect (fake).
+		if capable, ok := drv.(interface {
+			HostCapacity(context.Context) (core.Resources, error)
+		}); ok {
+			capCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			detected, cerr := capable.HostCapacity(capCtx)
+			cancel()
+			if cerr != nil {
+				return fmt.Errorf("detect host capacity: %w", cerr)
 			}
-			drv = d
-		default:
-			return fmt.Errorf("unknown driver %q", driverName)
+			total = detected
 		}
 
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -113,9 +117,9 @@ var agentCmd = &cobra.Command{
 func init() {
 	agentCmd.Flags().String("node.name", "", "Node name; defaults to the hostname")
 	agentCmd.Flags().String("node.arch", "amd64", "Node architecture")
-	agentCmd.Flags().Int("node.vcpu", 8, "Total vCPUs")
-	agentCmd.Flags().Int("node.ram", 16, "Total RAM in GiB")
-	agentCmd.Flags().Int("node.disk", 200, "Total disk in GiB")
+	agentCmd.Flags().Int("node.vcpu", 8, "Total vCPUs (ignored when the engine reports its host)")
+	agentCmd.Flags().Int("node.ram", 16, "Total RAM in GiB (ignored when the engine reports its host)")
+	agentCmd.Flags().Int("node.disk", 200, "Total disk in GiB (ignored when the engine reports its host)")
 	agentCmd.Flags().String("driver", "fake", "compute engine (fake, kvm, esxi)")
 	agentCmd.Flags().String("agent.addr", ":9090", "gRPC listen address")
 	agentCmd.Flags().String("node.advertise", "", "address the controller should dial (default: agent.addr)")

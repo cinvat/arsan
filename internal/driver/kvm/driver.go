@@ -187,7 +187,68 @@ func (d *Driver) Migrate(_ context.Context, _, _ string) error {
 	return fmt.Errorf("kvm: live migration is not implemented")
 }
 
-// Usage reports host memory pressure: total from nodeinfo minus free from
+// HostCapacity reports what the host actually has: CPUs and memory from
+// nodeinfo, free disk where guests live. Declaring capacity by hand would be a
+// second copy of facts libvirt already knows, drifting the first time the
+// host changes.
+func (d *Driver) HostCapacity(ctx context.Context) (core.Resources, error) {
+	info, err := run(ctx, "nodeinfo")
+	if err != nil {
+		return core.Resources{}, err
+	}
+	return core.Resources{
+		VCPU: parseNodeinfoCPUs(info),
+		RAM:  parseNodeinfoMemoryKiB(info) / (1024 * 1024),
+		Disk: guestDiskFreeGiB(ctx),
+	}, nil
+}
+
+// parseNodeinfoCPUs reads the "CPU(s): 8" line of `virsh nodeinfo`.
+func parseNodeinfoCPUs(out string) int {
+	for _, line := range strings.Split(out, "\n") {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok || strings.TrimSpace(name) != "CPU(s)" {
+			continue
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+// guestDiskFreeGiB is the free space where guest disks land. Unknown is zero,
+// not an error — capacity detection must not fail a host whose disk layout is
+// merely unusual.
+func guestDiskFreeGiB(ctx context.Context) int {
+	for _, dir := range []string{"/var/lib/libvirt/images", "/var/lib/libvirt", "/"} {
+		out, err := dfAvailGiB(ctx, dir)
+		if err == nil {
+			return out
+		}
+	}
+	return 0
+}
+
+func dfAvailGiB(ctx context.Context, dir string) (int, error) {
+	cmd := exec.CommandContext(ctx, "df", "-BG", "--output=avail", dir)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return 0, err
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) < 2 {
+		return 0, fmt.Errorf("df: unexpected output")
+	}
+	v := strings.TrimSuffix(strings.TrimSpace(lines[1]), "G")
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("df: unexpected output %q", lines[1])
+	}
+	return n, nil
+}
+
 // freecell. CPU and disk usage are not tracked by this engine yet; the probe
 // only needs the call to succeed, and placement decisions come from
 // reservations, not from here.
