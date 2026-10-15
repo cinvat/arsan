@@ -64,7 +64,7 @@ func registerTestNode(t *testing.T, c *Controller, id string, enabled bool) core
 	t.Helper()
 	n, err := c.Store.Register(t.Context(), core.Node{
 		ID: id, Name: id, Enabled: enabled,
-		Total:     core.Resources{VCPU: 8, RAM: 16, Disk: 200},
+		Total:     core.Resources{CPU: 8, RAM: 16, Disk: 200},
 		Instances: []string{},
 	})
 	if err != nil {

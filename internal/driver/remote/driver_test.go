@@ -39,7 +39,7 @@ func dial(t *testing.T) *Driver {
 func TestRemoteDriverRoundTrip(t *testing.T) {
 	d := dial(t)
 	ctx := t.Context()
-	flavor := core.Flavor{Name: "m1", VCPU: 1, RAM: 2, Disk: 10}
+	flavor := core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10}
 
 	if err := d.Validate(ctx, flavor); err != nil {
 		t.Fatalf("validate: %v", err)

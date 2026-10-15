@@ -47,7 +47,8 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 			return err
 		}
 		nodes := &records.Nodes{Store: store}
-		instances := &records.Instances{Store: store, Bus: commands}
+		flavors := &records.Flavors{Store: store}
+		instances := &records.Instances{Store: store, Flavors: store, Bus: commands}
 
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
@@ -60,6 +61,7 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 			Handler: api.Register(api.Config{
 				Instances:      instances,
 				Nodes:          nodes,
+				Flavors:        flavors,
 				Bus:            commands,
 				BootstrapToken: bootstrapToken(),
 			}),

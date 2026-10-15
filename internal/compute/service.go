@@ -174,6 +174,9 @@ func (s *Service) build(ctx context.Context, id string) error {
 	}
 	inst.NodeID = placed.NodeID
 	inst.Generation = placed.Generation
+	// A dedicated placement carries exclusive CPUs; they live on the instance
+	// so teardown frees exactly them, and the engine pins to exactly them.
+	inst.PinnedCPUs = placed.PinnedCPUs
 	inst, err = s.cfg.Instances.Update(ctx, inst)
 	if err != nil {
 		return fmt.Errorf("record placement: %w", err)
@@ -182,7 +185,7 @@ func (s *Service) build(ctx context.Context, id string) error {
 	if err := s.withEngine(ctx, placed.NodeID, func(dctx context.Context, d core.Driver) error {
 		if _, err := d.Create(dctx, core.CreateRequest{
 			InstanceID: id, NodeID: placed.NodeID, Name: inst.Name,
-			Flavor: inst.Flavor, ImageRef: inst.ImageRef,
+			Flavor: inst.Flavor, PinnedCPUs: inst.PinnedCPUs, ImageRef: inst.ImageRef,
 		}); err != nil {
 			return err
 		}

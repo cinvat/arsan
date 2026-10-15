@@ -24,6 +24,9 @@ type CreateRequest struct {
 	NodeID     string
 	Name       string
 	Flavor     Flavor
+	// PinnedCPUs carries the scheduler's exclusive CPUs for a dedicated
+	// flavor. Empty for shared flavors; the engine pins only what is here.
+	PinnedCPUs []int
 	ImageRef   string
 }
 
@@ -76,6 +79,15 @@ type NodeStore interface {
 	ReserveNodeResources(ctx context.Context, nodeID string, r Resources) error
 	ReleaseNodeResources(ctx context.Context, nodeID string, r Resources) error
 
+	// ClaimCPUs exclusively reserves count host CPUs and returns which.
+	// First-fit over the node's free set; the count decrement rides along so
+	// Available.CPU stays the single capacity truth. Lost claims report
+	// ErrCapacityConflict without mutating, like ReserveNodeResources.
+	ClaimCPUs(ctx context.Context, nodeID string, count int) ([]int, error)
+	// ReleaseCPUs frees a previous claim, restoring the count. Unknown CPUs
+	// are ignored so a repeated release is a no-op.
+	ReleaseCPUs(ctx context.Context, nodeID string, cpus []int) error
+
 	AttachInstance(ctx context.Context, nodeID, instanceID string) error
 	DetachInstance(ctx context.Context, nodeID, instanceID string) error
 }
@@ -85,7 +97,36 @@ type NodeStore interface {
 type CreateInstanceRequest struct {
 	Name     string `json:"name"`
 	ImageRef string `json:"image_ref"`
-	Flavor   Flavor `json:"flavor"`
+	// FlavorRef names a stored flavor. It is the preferred way to size a VM;
+	// the instance keeps a snapshot of the flavor's resources at create time,
+	// so later flavor edits do not resize existing VMs.
+	FlavorRef string `json:"flavor_ref"`
+	// Flavor is the legacy inline sizing, kept for back-compat. When FlavorRef
+	// is set it wins and Flavor is ignored.
+	Flavor Flavor `json:"flavor"`
+}
+
+// FlavorStore persists named flavors. Flavors are immutable after creation:
+// resizing is a new flavor, never an update, so a VM's snapshot stays valid.
+type FlavorStore interface {
+	CreateFlavor(ctx context.Context, f Flavor) (Flavor, error)
+	GetFlavor(ctx context.Context, name string) (Flavor, error)
+	ListFlavors(ctx context.Context) ([]Flavor, error)
+	DeleteFlavor(ctx context.Context, name string) error
+}
+
+type CreateFlavorRequest struct {
+	Name   string   `json:"name"`
+	VCPU   VCPU     `json:"vcpu"`
+	Memory Quantity `json:"memory"`
+	Disk   Quantity `json:"disk"`
+}
+
+type FlavorService interface {
+	Create(ctx context.Context, req CreateFlavorRequest) (Flavor, error)
+	Get(ctx context.Context, name string) (Flavor, error)
+	List(ctx context.Context) ([]Flavor, error)
+	Delete(ctx context.Context, name string) error
 }
 
 type InstanceService interface {
@@ -111,6 +152,9 @@ type PlacementRequest struct {
 type Placement struct {
 	InstanceID string
 	NodeID     string
+	// PinnedCPUs carries a dedicated claim's exclusive CPUs. The compute
+	// service records them on the instance and hands them to the engine.
+	PinnedCPUs []int
 	Generation int
 	Attempt    int
 	Reason     string

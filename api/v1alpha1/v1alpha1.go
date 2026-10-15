@@ -22,6 +22,7 @@ const APIVersion = "v1alpha1"
 type Config struct {
 	Instances core.InstanceService
 	Nodes     core.NodeService
+	Flavors   core.FlavorService
 	Bus       bus.Bus
 	// BootstrapToken is the shared secret an agent presents to register.
 	// Empty disables agent registration entirely.
@@ -30,7 +31,7 @@ type Config struct {
 
 // Register mounts this version onto the engine under its own group.
 func Register(r *gin.Engine, cfg Config) {
-	h := handler.New(cfg.Instances, cfg.Nodes)
+	h := handler.New(cfg.Instances, cfg.Nodes, cfg.Flavors)
 
 	bootstrap := &handler.Bootstrap{
 		Token: cfg.BootstrapToken,
@@ -57,4 +58,10 @@ func Register(r *gin.Engine, cfg Config) {
 	g.DELETE("/virtualmachines/:id", h.DeleteVirtualMachine)
 	g.POST("/virtualmachines/:id/start", h.StartVirtualMachine)
 	g.POST("/virtualmachines/:id/stop", h.StopVirtualMachine)
+
+	// Flavors. Named, immutable sizing referenced by flavor_ref at VM create.
+	g.POST("/flavors", h.CreateFlavor)
+	g.GET("/flavors", h.ListFlavors)
+	g.GET("/flavors/:name", h.GetFlavor)
+	g.DELETE("/flavors/:name", h.DeleteFlavor)
 }

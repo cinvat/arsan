@@ -83,10 +83,35 @@ func (s *Nodes) Disable(ctx context.Context, id string) error {
 	return err
 }
 
+// Flavors implements core.FlavorService. Flavors are immutable definitions;
+// there is no update, only create and delete (delete refused while in use).
+type Flavors struct {
+	Store core.FlavorStore
+}
+
+func (s *Flavors) Create(ctx context.Context, req core.CreateFlavorRequest) (core.Flavor, error) {
+	return s.Store.CreateFlavor(ctx, core.Flavor{Name: req.Name, VCPU: req.VCPU, RAM: req.Memory.MiB(), Disk: req.Disk.MiB()})
+}
+
+func (s *Flavors) Get(ctx context.Context, name string) (core.Flavor, error) {
+	return s.Store.GetFlavor(ctx, name)
+}
+
+func (s *Flavors) List(ctx context.Context) ([]core.Flavor, error) {
+	return s.Store.ListFlavors(ctx)
+}
+
+func (s *Flavors) Delete(ctx context.Context, name string) error {
+	return s.Store.DeleteFlavor(ctx, name)
+}
+
 // Instances implements core.InstanceService over an instance store and the bus.
 type Instances struct {
 	Store core.InstanceStore
-	Bus   bus.Bus
+	// Flavors resolves FlavorRef at create time. Nil keeps legacy inline-only
+	// behavior (tests that construct Instances directly).
+	Flavors core.FlavorStore
+	Bus     bus.Bus
 }
 
 // Create validates, persists a PENDING instance, and asks the controller to
@@ -103,15 +128,29 @@ func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) 
 	if req.ImageRef == "" {
 		return core.Instance{}, fmt.Errorf("image_ref required: %w", core.ErrInvalidRequest)
 	}
-	if req.Flavor.VCPU <= 0 || req.Flavor.RAM <= 0 || req.Flavor.Disk <= 0 {
-		return core.Instance{}, fmt.Errorf("flavor must have positive vcpu, ram and disk: %w", core.ErrInvalidRequest)
+	flavor := req.Flavor
+	if req.FlavorRef != "" {
+		if s.Flavors == nil {
+			return core.Instance{}, fmt.Errorf("flavor_ref %q: flavor store not configured: %w", req.FlavorRef, core.ErrInvalidRequest)
+		}
+		f, err := s.Flavors.GetFlavor(ctx, req.FlavorRef)
+		if err != nil {
+			return core.Instance{}, err
+		}
+		flavor = f
+	}
+	if err := flavor.VCPU.Validate(); err != nil {
+		return core.Instance{}, err
+	}
+	if flavor.RAM <= 0 || flavor.Disk <= 0 {
+		return core.Instance{}, fmt.Errorf("flavor must have positive ram and disk: %w", core.ErrInvalidRequest)
 	}
 
 	now := time.Now().UTC()
 	inst := core.Instance{
 		ID:        util.NewID("i"),
 		Name:      req.Name,
-		Flavor:    req.Flavor,
+		Flavor:    flavor,
 		ImageRef:  req.ImageRef,
 		State:     core.StatePending,
 		CreatedAt: now,
@@ -198,6 +237,7 @@ func (s *Instances) publish(ctx context.Context, topic, target string, payload [
 var (
 	_ core.NodeService     = (*Nodes)(nil)
 	_ core.InstanceService = (*Instances)(nil)
+	_ core.FlavorService   = (*Flavors)(nil)
 )
 
 // ErrUnimplemented marks a CRUD method the api deliberately does not perform.

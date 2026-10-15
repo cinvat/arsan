@@ -122,8 +122,11 @@ type FlavorFilter struct{}
 func (FlavorFilter) Name() string { return "Flavor" }
 
 func (FlavorFilter) FilterRequest(_ context.Context, req core.PlacementRequest) error {
-	if req.Flavor.VCPU <= 0 || req.Flavor.RAM <= 0 || req.Flavor.Disk <= 0 {
-		return fmt.Errorf("flavor must have positive vcpu, ram and disk: %w", core.ErrInvalidRequest)
+	if err := req.Flavor.VCPU.Validate(); err != nil {
+		return err
+	}
+	if req.Flavor.RAM <= 0 || req.Flavor.Disk <= 0 {
+		return fmt.Errorf("flavor must have positive ram and disk: %w", core.ErrInvalidRequest)
 	}
 	return nil
 }

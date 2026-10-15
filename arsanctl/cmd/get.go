@@ -43,10 +43,10 @@ var getCmd = &cobra.Command{
 }
 
 func printNodes(nodes []Node) {
-	fmt.Printf("%-32s %-10s %-8s %-8s %s\n", "ID", "STATE", "ENGINE", "VCPU", "REASON")
+	fmt.Printf("%-32s %-10s %-8s %-8s %s\n", "ID", "STATE", "ENGINE", "CPU", "REASON")
 	for _, n := range nodes {
 		fmt.Printf("%-32s %-10s %-8s %-8d %s\n",
-			n.ID, n.State, n.Driver, n.Total.VCPU, n.NotReadyReason)
+			n.ID, n.State, n.Driver, n.Total.CPU, n.NotReadyReason)
 	}
 }
 

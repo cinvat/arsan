@@ -17,6 +17,9 @@ package kvm
 
 import (
 	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/cinvat/arsan/internal/core"
 )
@@ -27,12 +30,32 @@ import (
 func domainName(id string) string { return "arsan-" + id }
 
 // domainXML renders a minimal KVM guest: virtio disk and NIC, no graphics.
-// RAM is GiB in the api and KiB in libvirt.
+// RAM is MiB in the api and KiB in libvirt.
+//
+// vCPU topology is always rendered: a bare count leaves the guest layout to
+// QEMU's default, which silently differs from what the flavor promised.
+// Dedicated flavors additionally pin each vCPU to its exclusive host CPU and
+// pin the emulator threads alongside, so nothing else is scheduled there.
 func domainXML(name string, req core.CreateRequest) string {
+	v := req.Flavor.VCPU
+	topology := fmt.Sprintf(`<cpu><topology sockets='%d' cores='%d' threads='%d'/></cpu>`,
+		v.Sockets, v.Cores, v.Threads)
+	pinning := ""
+	if len(req.PinnedCPUs) > 0 {
+		var pins strings.Builder
+		for i, cpu := range req.PinnedCPUs {
+			fmt.Fprintf(&pins, "\n    <vcpupin vcpu='%d' cpuset='%d'/>", i, cpu)
+		}
+		fmt.Fprintf(&pins, "\n    <emulatorpin cpuset='%s'/>", cpuset(req.PinnedCPUs))
+		pinning = fmt.Sprintf(`<cputune>%s
+  </cputune>
+  `, pins.String())
+	}
 	return fmt.Sprintf(`<domain type='kvm'>
   <name>%s</name>
   <memory unit='KiB'>%d</memory>
   <vcpu>%d</vcpu>
+%s  %s
   <os>
     <type arch='x86_64' machine='pc'>hvm</type>
     <boot dev='hd'/>
@@ -49,5 +72,30 @@ func domainXML(name string, req core.CreateRequest) string {
     </interface>
   </devices>
 </domain>
-`, name, req.Flavor.RAM*1024*1024, req.Flavor.VCPU, req.ImageRef)
+`, name, req.Flavor.RAM*1024, v.Count(), pinning, topology, req.ImageRef)
+}
+
+// cpuset renders pins as a libvirt cpuset: "0-3,7".
+func cpuset(pins []int) string {
+	sorted := slices.Clone(pins)
+	slices.Sort(sorted)
+	var parts []string
+	start, prev := sorted[0], sorted[0]
+	flush := func() {
+		if start == prev {
+			parts = append(parts, strconv.Itoa(start))
+		} else {
+			parts = append(parts, strconv.Itoa(start)+"-"+strconv.Itoa(prev))
+		}
+	}
+	for _, c := range sorted[1:] {
+		if c == prev+1 {
+			prev = c
+			continue
+		}
+		flush()
+		start, prev = c, c
+	}
+	flush()
+	return strings.Join(parts, ",")
 }

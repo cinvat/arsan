@@ -108,7 +108,27 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 		winner, runnerUp := best(weighed)
 
 		want := req.Flavor.Resources()
-		if err := s.nodes.ReserveNodeResources(ctx, winner.NodeID, want); err != nil {
+		// Dedicated flavors claim exclusive CPUs, not just counts: the pins
+		// are part of the placement, recorded on the instance by compute.
+		var pins []int
+		release := func() {
+			_ = s.nodes.ReleaseNodeResources(ctx, winner.NodeID, want)
+		}
+		if req.Flavor.VCPU.Dedicated {
+			var err error
+			pins, err = s.nodes.ClaimCPUs(ctx, winner.NodeID, want.CPU)
+			if err != nil {
+				if errors.Is(err, core.ErrCapacityConflict) {
+					lastConflict = fmt.Sprintf("attempt %d: node %s has no free cpus", attempt, winner.NodeID)
+					s.log.Warn("claim lost, retrying", "attempt", attempt, "node", winner.NodeID)
+					continue
+				}
+				return core.Placement{}, fmt.Errorf("claim %s: %w", winner.NodeID, err)
+			}
+			release = func() {
+				_ = s.nodes.ReleaseCPUs(ctx, winner.NodeID, pins)
+			}
+		} else if err := s.nodes.ReserveNodeResources(ctx, winner.NodeID, want); err != nil {
 			if errors.Is(err, core.ErrCapacityConflict) {
 				lastConflict = fmt.Sprintf("attempt %d: node %s no longer fits", attempt, winner.NodeID)
 				s.log.Warn("claim lost, retrying", "attempt", attempt, "node", winner.NodeID)
@@ -117,13 +137,14 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 			return core.Placement{}, fmt.Errorf("claim %s: %w", winner.NodeID, err)
 		}
 		if err := s.nodes.AttachInstance(ctx, winner.NodeID, req.InstanceID); err != nil {
-			_ = s.nodes.ReleaseNodeResources(ctx, winner.NodeID, want)
+			release()
 			return core.Placement{}, fmt.Errorf("attach instance: %w", err)
 		}
 
 		return core.Placement{
 			InstanceID: req.InstanceID,
 			NodeID:     winner.NodeID,
+			PinnedCPUs: pins,
 			Generation: req.Generation,
 			Attempt:    attempt,
 			Reason:     explain(winner, runnerUp),

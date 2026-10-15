@@ -13,8 +13,15 @@ const (
 	StateError      InstanceState = "ERROR"
 )
 
+// Resources describe a node: CPU count, RAM in MiB, Disk in MiB.
+// Nodes have CPUs; virtual machines have VCPUs (core.Flavor). The scheduler
+// matches flavor VCPU against node CPU one-for-one.
+//
+// MiB (not GiB) because tiny guests exist: a RouterOS VM runs in 32MiB,
+// which GiB granularity cannot express. Sizes enter the system as "32MB"/"2GB"
+// strings (core.Quantity) and are stored here canonicalized to MiB.
 type Resources struct {
-	VCPU int
+	CPU  int
 	RAM  int
 	Disk int
 }
@@ -24,8 +31,8 @@ type Resources struct {
 // not invent capacity the host never had.
 func (r Resources) AddCapped(ret, total Resources) Resources {
 	out := r.Add(ret)
-	if out.VCPU > total.VCPU {
-		out.VCPU = total.VCPU
+	if out.CPU > total.CPU {
+		out.CPU = total.CPU
 	}
 	if out.RAM > total.RAM {
 		out.RAM = total.RAM
@@ -37,36 +44,40 @@ func (r Resources) AddCapped(ret, total Resources) Resources {
 }
 
 func (r Resources) Fits(other Resources) bool {
-	return r.VCPU >= other.VCPU && r.RAM >= other.RAM && r.Disk >= other.Disk
+	return r.CPU >= other.CPU && r.RAM >= other.RAM && r.Disk >= other.Disk
 }
 
 func (r Resources) Sub(other Resources) Resources {
-	return Resources{VCPU: r.VCPU - other.VCPU, RAM: r.RAM - other.RAM, Disk: r.Disk - other.Disk}
+	return Resources{CPU: r.CPU - other.CPU, RAM: r.RAM - other.RAM, Disk: r.Disk - other.Disk}
 }
 
 func (r Resources) Add(other Resources) Resources {
-	return Resources{VCPU: r.VCPU + other.VCPU, RAM: r.RAM + other.RAM, Disk: r.Disk + other.Disk}
+	return Resources{CPU: r.CPU + other.CPU, RAM: r.RAM + other.RAM, Disk: r.Disk + other.Disk}
 }
 
+// Flavor sizes a VM: vCPU topology, RAM in MiB, Disk in MiB.
 type Flavor struct {
 	Name string
-	VCPU int
+	VCPU VCPU
 	RAM  int
 	Disk int
 }
 
 func (f Flavor) Resources() Resources {
-	return Resources{VCPU: f.VCPU, RAM: f.RAM, Disk: f.Disk}
+	return Resources{CPU: f.VCPU.Count(), RAM: f.RAM, Disk: f.Disk}
 }
 
 type Instance struct {
-	ID            string
-	Name          string
-	Flavor        Flavor
-	ImageRef      string
-	State         InstanceState
-	NodeID        string
-	Generation    int
+	ID         string
+	Name       string
+	Flavor     Flavor
+	ImageRef   string
+	State      InstanceState
+	NodeID     string
+	Generation int
+	// PinnedCPUs holds the exclusive host CPUs for a dedicated flavor,
+	// claimed at placement and freed on teardown. Empty for shared flavors.
+	PinnedCPUs    []int
 	FailureReason string
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
@@ -101,11 +112,14 @@ type Node struct {
 	Enabled bool
 	// Driver and Total are filled by the controller's probe, never by
 	// bootstrap: the agent joins knowing nothing but the token.
-	Driver        string
-	Total         Resources
-	Available     Resources
-	Usage         Resources
-	Instances     []string
+	Driver    string
+	Total     Resources
+	Available Resources
+	Usage     Resources
+	Instances []string
+	// PinnedCPUs are the host CPUs exclusively held by dedicated flavors.
+	// Available.CPU already excludes them; this is the record of which.
+	PinnedCPUs    []int
 	LastHeartbeat time.Time
 	// NotReadyReason explains a NOTREADY state, for an operator reading the
 	// API. It is cleared when the node comes back.

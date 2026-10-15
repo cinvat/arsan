@@ -10,5 +10,6 @@ var (
 	ErrRequestRejected     = errors.New("request rejected by scheduler")
 	ErrCapacityConflict    = errors.New("capacity conflict")
 	ErrInvalidRequest      = errors.New("invalid request")
+	ErrFlavorNotFound      = errors.New("flavor not found")
 	ErrUnsupportedPlatform = errors.New("hypervisor not available on this platform")
 )

@@ -1,0 +1,24 @@
+apiVersion: v1alpha1
+kind: Flavor
+metadata:
+  name: m1.small
+spec:
+  vcpu: 1
+  memory: 32MB
+  disk: 10GB
+---
+apiVersion: v1alpha1
+kind: VirtualMachine
+metadata:
+  name: web1
+spec:
+  image: https://example.com/base.qcow2
+  flavorRef: m1.small
+---
+apiVersion: v1alpha1
+kind: VirtualMachine
+metadata:
+  name: web2
+spec:
+  image: https://example.com/base.qcow2
+  flavorRef: m1.small

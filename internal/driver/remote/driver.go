@@ -60,7 +60,7 @@ func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
 func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.InstanceInfo, error) {
 	resp, err := d.call(ctx, agent.Request{
 		Op: agent.OpCreate, InstanceID: req.InstanceID, NodeID: req.NodeID,
-		Name: req.Name, Flavor: req.Flavor, ImageRef: req.ImageRef,
+		Name: req.Name, Flavor: req.Flavor, PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
 	})
 	if err != nil {
 		return core.InstanceInfo{}, err

@@ -19,7 +19,7 @@ type FreeCPUWeigher struct{}
 func (FreeCPUWeigher) Name() string { return "FreeCPU" }
 
 func (FreeCPUWeigher) WeightNode(_ context.Context, _ core.PlacementRequest, n core.Node) (int, error) {
-	return n.Available.VCPU * 1024, nil
+	return n.Available.CPU * 1024, nil
 }
 
 type FewestInstancesWeigher struct{}

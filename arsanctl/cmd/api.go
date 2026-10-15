@@ -10,16 +10,59 @@ import (
 	"time"
 )
 
-// Resources mirrors the api's shape. Field names match the server's JSON.
+// Resources mirrors the api's node shape: nodes have CPU, VMs have VCPU.
+// Field names match the server's JSON.
 type Resources struct {
-	VCPU int `json:"VCPU"`
+	CPU  int `json:"CPU"`
 	RAM  int `json:"RAM"`
 	Disk int `json:"Disk"`
 }
 
+// VCPU mirrors the api's topology object. It accepts a mapping or a legacy
+// bare count, in JSON and YAML alike.
+type VCPU struct {
+	Sockets   int  `json:"sockets" yaml:"sockets"`
+	Cores     int  `json:"cores" yaml:"cores"`
+	Threads   int  `json:"threads" yaml:"threads"`
+	Dedicated bool `json:"dedicated" yaml:"dedicated"`
+}
+
+// Count is the schedulable number of vCPUs.
+func (v VCPU) Count() int { return v.Sockets * v.Cores * v.Threads }
+
+func (v *VCPU) UnmarshalJSON(raw []byte) error {
+	var n int
+	if err := json.Unmarshal(raw, &n); err == nil {
+		*v = VCPU{Sockets: 1, Cores: n, Threads: 1}
+		return nil
+	}
+	type plain VCPU
+	var p plain
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return err
+	}
+	*v = VCPU(p)
+	return nil
+}
+
+func (v *VCPU) UnmarshalYAML(unmarshal func(any) error) error {
+	var n int
+	if err := unmarshal(&n); err == nil {
+		*v = VCPU{Sockets: 1, Cores: n, Threads: 1}
+		return nil
+	}
+	type plain VCPU
+	var p plain
+	if err := unmarshal(&p); err != nil {
+		return err
+	}
+	*v = VCPU(p)
+	return nil
+}
+
 type Flavor struct {
 	Name string `json:"Name"`
-	VCPU int    `json:"VCPU"`
+	VCPU VCPU   `json:"VCPU"`
 	RAM  int    `json:"RAM"`
 	Disk int    `json:"Disk"`
 }
@@ -126,12 +169,32 @@ func (c *Client) GetVirtualMachines() ([]VirtualMachine, error) {
 	return out, nil
 }
 
-func (c *Client) CreateVirtualMachine(name, image string, flavor Flavor) (VirtualMachine, error) {
+func (c *Client) CreateVirtualMachine(name, image, flavorRef string, flavor Flavor) (VirtualMachine, error) {
 	var out VirtualMachine
-	err := c.post("/virtualmachines", map[string]any{
-		"name": name, "image_ref": image, "flavor": flavor,
+	body := map[string]any{"name": name, "image_ref": image}
+	if flavorRef != "" {
+		body["flavor_ref"] = flavorRef
+	} else {
+		body["flavor"] = flavor
+	}
+	err := c.post("/virtualmachines", body, &out)
+	return out, err
+}
+
+func (c *Client) CreateFlavor(name string, vcpu VCPU, memory, disk string) (Flavor, error) {
+	var out Flavor
+	err := c.post("/flavors", map[string]any{
+		"name": name, "vcpu": vcpu, "memory": memory, "disk": disk,
 	}, &out)
 	return out, err
+}
+
+func (c *Client) GetFlavors() ([]Flavor, error) {
+	var out []Flavor
+	if err := c.get("/flavors", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *Client) DeleteVirtualMachine(id string) error {

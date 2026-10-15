@@ -87,7 +87,10 @@ func (d *Driver) lookup(name string) (*libvirt.Domain, error) {
 // Validate checks the daemon answers and the flavor asks for something real.
 // It does not reserve anything; placement already claimed capacity.
 func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
-	if f.VCPU <= 0 || f.RAM <= 0 || f.Disk <= 0 {
+	if err := f.VCPU.Validate(); err != nil {
+		return fmt.Errorf("kvm: flavor %q has no resources: %w", f.Name, core.ErrRequestRejected)
+	}
+	if f.RAM <= 0 || f.Disk <= 0 {
 		return fmt.Errorf("kvm: flavor %q has no resources: %w", f.Name, core.ErrRequestRejected)
 	}
 	return d.do(ctx, func() error {
@@ -105,6 +108,13 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 	info := core.InstanceInfo{ID: req.InstanceID, NodeID: req.NodeID, Driver: d.name}
 	if req.ImageRef == "" {
 		return core.InstanceInfo{}, fmt.Errorf("kvm: image_ref is required: %w", core.ErrRequestRejected)
+	}
+	// A dedicated flavor without exactly its vCPUs' worth of pins is a
+	// scheduler bug, not a placement to attempt: booting it floating would
+	// silently break the exclusivity the flavor promises.
+	if req.Flavor.VCPU.Dedicated && len(req.PinnedCPUs) != req.Flavor.VCPU.Count() {
+		return core.InstanceInfo{}, fmt.Errorf("kvm: dedicated flavor needs %d pins, got %d: %w",
+			req.Flavor.VCPU.Count(), len(req.PinnedCPUs), core.ErrRequestRejected)
 	}
 	disk, err := resolveImage(ctx, req.ImageRef)
 	if err != nil {
@@ -259,7 +269,7 @@ func (d *Driver) HostCapacity(ctx context.Context) (core.Resources, error) {
 		if err != nil {
 			return err
 		}
-		out = core.Resources{VCPU: int(info.Cpus), RAM: int(info.Memory / (1024 * 1024))}
+		out = core.Resources{CPU: int(info.Cpus), RAM: int(info.Memory / 1024)}
 		pools, err := d.conn.ListAllStoragePools(0)
 		if err != nil {
 			return err
@@ -283,7 +293,7 @@ func (d *Driver) HostCapacity(ctx context.Context) (core.Resources, error) {
 			}
 			diskBytes += pinfo.Available
 		}
-		out.Disk = int(diskBytes / (1024 * 1024 * 1024))
+		out.Disk = int(diskBytes / (1024 * 1024))
 		return nil
 	})
 	return out, err
@@ -309,8 +319,8 @@ func (d *Driver) Usage(ctx context.Context) (core.Resources, error) {
 			if info.State != libvirt.DOMAIN_RUNNING {
 				continue
 			}
-			out.VCPU += int(info.NrVirtCpu)
-			out.RAM += int(info.Memory / (1024 * 1024))
+			out.CPU += int(info.NrVirtCpu)
+			out.RAM += int(info.Memory / 1024)
 		}
 		return nil
 	})

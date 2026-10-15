@@ -17,13 +17,77 @@ type Store struct {
 	mu        sync.RWMutex
 	instances map[string]core.Instance
 	nodes     map[string]core.Node
+	flavors   map[string]core.Flavor
 }
 
 func New() *Store {
 	return &Store{
 		instances: make(map[string]core.Instance),
 		nodes:     make(map[string]core.Node),
+		flavors:   make(map[string]core.Flavor),
 	}
+}
+
+func (s *Store) CreateFlavor(ctx context.Context, f core.Flavor) (core.Flavor, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Flavor{}, err
+	}
+	if f.Name == "" {
+		return core.Flavor{}, fmt.Errorf("flavor name required: %w", core.ErrInvalidRequest)
+	}
+	if err := f.VCPU.Validate(); err != nil {
+		return core.Flavor{}, err
+	}
+	if f.RAM <= 0 || f.Disk <= 0 {
+		return core.Flavor{}, fmt.Errorf("flavor must have positive ram and disk: %w", core.ErrInvalidRequest)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.flavors[f.Name]; ok {
+		return core.Flavor{}, fmt.Errorf("flavor %s exists: %w", f.Name, core.ErrInvalidRequest)
+	}
+	s.flavors[f.Name] = f
+	return f, nil
+}
+
+func (s *Store) GetFlavor(ctx context.Context, name string) (core.Flavor, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Flavor{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	f, ok := s.flavors[name]
+	if !ok {
+		return core.Flavor{}, fmt.Errorf("get flavor %s: %w", name, core.ErrFlavorNotFound)
+	}
+	return f, nil
+}
+
+func (s *Store) ListFlavors(ctx context.Context) ([]core.Flavor, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.SortedFunc(maps.Values(s.flavors),
+		func(a, b core.Flavor) int { return cmp.Compare(a.Name, b.Name) }), nil
+}
+
+func (s *Store) DeleteFlavor(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// A flavor in use must not vanish: existing VMs hold only a snapshot, and
+	// deleting the definition would leave their sizing unexplained.
+	for _, i := range s.instances {
+		if i.Flavor.Name == name {
+			return fmt.Errorf("flavor %s in use: %w", name, core.ErrInvalidRequest)
+		}
+	}
+	delete(s.flavors, name)
+	return nil
 }
 
 func (s *Store) Create(ctx context.Context, i core.Instance) (core.Instance, error) {
@@ -131,6 +195,16 @@ func (s *Store) ReleaseReservations(ctx context.Context, instanceID, nodeID stri
 		return nil
 	}
 	n.Available = n.Available.AddCapped(i.Flavor.Resources(), n.Total)
+	// Free the instance's exclusive CPUs, if it held any. Count restoration
+	// above and pin release here are the two halves of one teardown; the
+	// instance record carries the pins so a retry frees exactly what was held.
+	if len(i.PinnedCPUs) > 0 {
+		free := make(map[int]bool, len(i.PinnedCPUs))
+		for _, c := range i.PinnedCPUs {
+			free[c] = true
+		}
+		n.PinnedCPUs = lo.Filter(n.PinnedCPUs, func(c int, _ int) bool { return !free[c] })
+	}
 	n.Instances = lo.Filter(n.Instances, func(s string, _ int) bool { return s != instanceID })
 	s.nodes[nodeID] = n
 	return nil
@@ -214,7 +288,7 @@ func (s *Store) SetNodeSpec(ctx context.Context, id string, engine string, total
 	held := n.Total.Sub(n.Available)
 	n.Total = total
 	n.Available = core.Resources{
-		VCPU: max(total.VCPU-held.VCPU, 0),
+		CPU:  max(total.CPU-held.CPU, 0),
 		RAM:  max(total.RAM-held.RAM, 0),
 		Disk: max(total.Disk-held.Disk, 0),
 	}
@@ -256,6 +330,58 @@ func (s *Store) RecordUsage(ctx context.Context, id string, usage core.Resources
 	n.Usage = usage
 	s.nodes[id] = n
 	return n, nil
+}
+
+func (s *Store) ClaimCPUs(ctx context.Context, nodeID string, count int) ([]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if count <= 0 {
+		return nil, fmt.Errorf("claim %d cpus: %w", count, core.ErrInvalidRequest)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		return nil, fmt.Errorf("claim cpus %s: %w", nodeID, core.ErrNodeNotFound)
+	}
+	cpus, err := core.FreeCPUs(n.Total.CPU, n.PinnedCPUs, count)
+	if err != nil {
+		return nil, err
+	}
+	n.PinnedCPUs = append(slices.Clone(n.PinnedCPUs), cpus...)
+	n.Available.CPU -= count
+	s.nodes[nodeID] = n
+	return cpus, nil
+}
+
+func (s *Store) ReleaseCPUs(ctx context.Context, nodeID string, cpus []int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.nodes[nodeID]
+	if !ok {
+		return nil
+	}
+	free := make(map[int]bool, len(cpus))
+	for _, c := range cpus {
+		free[c] = true
+	}
+	kept := n.PinnedCPUs[:0:0]
+	released := 0
+	for _, c := range n.PinnedCPUs {
+		if free[c] {
+			released++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	n.PinnedCPUs = kept
+	n.Available = n.Available.AddCapped(core.Resources{CPU: released}, n.Total)
+	s.nodes[nodeID] = n
+	return nil
 }
 
 func (s *Store) ReserveNodeResources(ctx context.Context, nodeID string, r core.Resources) error {

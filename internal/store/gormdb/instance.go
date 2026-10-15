@@ -136,12 +136,41 @@ func (s *Store) ReleaseReservations(ctx context.Context, instanceID, nodeID stri
 
 		// Return the instance's own flavor, not the node's current
 		// availability, so a double release cannot inflate a node past its
-		// total. clampAdd is the second line of defence.
+		// total. clampAdd is the second line of defence. The count comes
+		// from the topology product: flavor_vcpu is the legacy column.
+		count := inst.FlavorSockets * inst.FlavorCores * inst.FlavorThreads
+		if count <= 0 {
+			count = inst.FlavorVCPU
+		}
 		updates := map[string]any{
-			"available_vcpu": clampAdd("available_vcpu", "total_vcpu", inst.FlavorVCPU),
+			"available_vcpu": clampAdd("available_vcpu", "total_vcpu", count),
 			"available_ram":  clampAdd("available_ram", "total_ram", inst.FlavorRAM),
 			"available_disk": clampAdd("available_disk", "total_disk", inst.FlavorDisk),
 			"updated_at":     time.Now().UTC(),
+		}
+		// Free the instance's exclusive CPUs alongside its count. The pins
+		// ride on the instance row, so a retried release frees exactly once:
+		// unknown CPUs are simply not present anymore.
+		if inst.PinnedCPUs != "" {
+			var node nodeRow
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				First(&node, "id = ?", nodeID).Error; err != nil {
+				if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+			} else {
+				free := make(map[int]bool)
+				for _, c := range splitInts(inst.PinnedCPUs) {
+					free[c] = true
+				}
+				var kept []int
+				for _, c := range splitInts(node.PinnedCPUs) {
+					if !free[c] {
+						kept = append(kept, c)
+					}
+				}
+				updates["pinned_cpus"] = joinInts(kept)
+			}
 		}
 		if err := tx.Model(&nodeRow{}).Where("id = ?", nodeID).Updates(updates).Error; err != nil {
 			return err
@@ -180,7 +209,7 @@ func (s *Store) Register(ctx context.Context, n core.Node) (core.Node, error) {
 		row.State = string(core.NodeNotReady)
 		row.NotReadyReason = "registered, awaiting first probe"
 		// A new node starts fully available; reservations subtract from here.
-		row.AvailableVCPU = n.Total.VCPU
+		row.AvailableVCPU = n.Total.CPU
 		row.AvailableRAM = n.Total.RAM
 		row.AvailableDisk = n.Total.Disk
 		now := time.Now().UTC()
@@ -247,10 +276,10 @@ func (s *Store) SetNodeSpec(ctx context.Context, id string, engine string, total
 	heldDisk := row.TotalDisk - row.AvailableDisk
 	updates := map[string]any{
 		"driver":         engine,
-		"total_vcpu":     total.VCPU,
+		"total_vcpu":     total.CPU,
 		"total_ram":      total.RAM,
 		"total_disk":     total.Disk,
-		"available_vcpu": max(total.VCPU-heldVCPU, 0),
+		"available_vcpu": max(total.CPU-heldVCPU, 0),
 		"available_ram":  max(total.RAM-heldRAM, 0),
 		"available_disk": max(total.Disk-heldDisk, 0),
 		"updated_at":     time.Now().UTC(),
@@ -304,7 +333,7 @@ func (s *Store) RecordUsage(ctx context.Context, id string, usage core.Resources
 	// the probe and put a broken host back into the eligible set.
 	updates := map[string]any{
 		"last_heartbeat": at,
-		"usage_vcpu":     usage.VCPU,
+		"usage_vcpu":     usage.CPU,
 		"usage_ram":      usage.RAM,
 		"usage_disk":     usage.Disk,
 		"updated_at":     time.Now().UTC(),
@@ -324,9 +353,9 @@ func (s *Store) RecordUsage(ctx context.Context, id string, usage core.Resources
 func (s *Store) ReserveNodeResources(ctx context.Context, nodeID string, r core.Resources) error {
 	res := s.withTimeout(ctx).Model(&nodeRow{}).
 		Where("id = ? AND available_vcpu >= ? AND available_ram >= ? AND available_disk >= ?",
-			nodeID, r.VCPU, r.RAM, r.Disk).
+			nodeID, r.CPU, r.RAM, r.Disk).
 		Updates(map[string]any{
-			"available_vcpu": gorm.Expr("available_vcpu - ?", r.VCPU),
+			"available_vcpu": gorm.Expr("available_vcpu - ?", r.CPU),
 			"available_ram":  gorm.Expr("available_ram - ?", r.RAM),
 			"available_disk": gorm.Expr("available_disk - ?", r.Disk),
 			"updated_at":     time.Now().UTC(),
@@ -353,13 +382,88 @@ func (s *Store) ReleaseNodeResources(ctx context.Context, nodeID string, r core.
 	// Clamp to the node's total so a double release cannot invent capacity.
 	res := s.withTimeout(ctx).Model(&nodeRow{}).Where("id = ?", nodeID).
 		Updates(map[string]any{
-			"available_vcpu": clampAdd("available_vcpu", "total_vcpu", r.VCPU),
+			"available_vcpu": clampAdd("available_vcpu", "total_vcpu", r.CPU),
 			"available_ram":  clampAdd("available_ram", "total_ram", r.RAM),
 			"available_disk": clampAdd("available_disk", "total_disk", r.Disk),
 			"updated_at":     time.Now().UTC(),
 		})
 	if res.Error != nil {
 		return fmt.Errorf("release node %s: %w", nodeID, res.Error)
+	}
+	return nil
+}
+
+// ClaimCPUs exclusively reserves count host CPUs inside one transaction: the
+// row lock serializes competing dedicated placements, so two winners cannot
+// hold the same CPU. The count decrement rides in the same write, keeping
+// Available.CPU the single capacity truth.
+func (s *Store) ClaimCPUs(ctx context.Context, nodeID string, count int) ([]int, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("claim %d cpus: %w", count, core.ErrInvalidRequest)
+	}
+	var cpus []int
+	err := s.withTimeout(ctx).Transaction(func(tx *gorm.DB) error {
+		var row nodeRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&row, "id = ?", nodeID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w", core.ErrNodeNotFound)
+			}
+			return err
+		}
+		var err error
+		cpus, err = core.FreeCPUs(row.TotalVCPU, splitInts(row.PinnedCPUs), count)
+		if err != nil {
+			return err
+		}
+		held := splitInts(row.PinnedCPUs)
+		updates := map[string]any{
+			"pinned_cpus":    joinInts(append(held, cpus...)),
+			"available_vcpu": gorm.Expr("available_vcpu - ?", count),
+			"updated_at":     time.Now().UTC(),
+		}
+		return tx.Model(&nodeRow{}).Where("id = ?", nodeID).Updates(updates).Error
+	})
+	if err != nil {
+		return nil, fmt.Errorf("claim cpus %s: %w", nodeID, err)
+	}
+	return cpus, nil
+}
+
+// ReleaseCPUs frees a previous claim and restores the count. Unknown CPUs are
+// ignored, so a repeated release is a no-op rather than invented capacity.
+func (s *Store) ReleaseCPUs(ctx context.Context, nodeID string, cpus []int) error {
+	err := s.withTimeout(ctx).Transaction(func(tx *gorm.DB) error {
+		var row nodeRow
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&row, "id = ?", nodeID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		free := make(map[int]bool, len(cpus))
+		for _, c := range cpus {
+			free[c] = true
+		}
+		var kept []int
+		released := 0
+		for _, c := range splitInts(row.PinnedCPUs) {
+			if free[c] {
+				released++
+				continue
+			}
+			kept = append(kept, c)
+		}
+		updates := map[string]any{
+			"pinned_cpus":    joinInts(kept),
+			"available_vcpu": clampAdd("available_vcpu", "total_vcpu", released),
+			"updated_at":     time.Now().UTC(),
+		}
+		return tx.Model(&nodeRow{}).Where("id = ?", nodeID).Updates(updates).Error
+	})
+	if err != nil {
+		return fmt.Errorf("release cpus %s: %w", nodeID, err)
 	}
 	return nil
 }
@@ -422,7 +526,64 @@ func detach(tx *gorm.DB, nodeID, instanceID string) error {
 		Update("instances", joinList(kept)).Error
 }
 
+// ------------------------------------------------------------------ flavors
+
+func (s *Store) CreateFlavor(ctx context.Context, f core.Flavor) (core.Flavor, error) {
+	if f.Name == "" {
+		return core.Flavor{}, fmt.Errorf("flavor name required: %w", core.ErrInvalidRequest)
+	}
+	if err := f.VCPU.Validate(); err != nil {
+		return core.Flavor{}, err
+	}
+	if f.RAM <= 0 || f.Disk <= 0 {
+		return core.Flavor{}, fmt.Errorf("flavor must have positive ram and disk: %w", core.ErrInvalidRequest)
+	}
+	row := fromFlavor(f)
+	if err := s.withTimeout(ctx).Create(&row).Error; err != nil {
+		return core.Flavor{}, fmt.Errorf("create flavor %s: %w", f.Name, err)
+	}
+	return f, nil
+}
+
+func (s *Store) GetFlavor(ctx context.Context, name string) (core.Flavor, error) {
+	var row flavorRow
+	if err := s.withTimeout(ctx).First(&row, "name = ?", name).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return core.Flavor{}, fmt.Errorf("get flavor %s: %w", name, core.ErrFlavorNotFound)
+		}
+		return core.Flavor{}, fmt.Errorf("get flavor %s: %w", name, err)
+	}
+	return toFlavor(row), nil
+}
+
+func (s *Store) ListFlavors(ctx context.Context) ([]core.Flavor, error) {
+	var rows []flavorRow
+	if err := s.withTimeout(ctx).Order("name").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("list flavors: %w", err)
+	}
+	out := make([]core.Flavor, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, toFlavor(r))
+	}
+	return out, nil
+}
+
+func (s *Store) DeleteFlavor(ctx context.Context, name string) error {
+	var n int64
+	if err := s.withTimeout(ctx).Model(&instanceRow{}).Where("flavor_name = ?", name).Count(&n).Error; err != nil {
+		return fmt.Errorf("delete flavor %s: %w", name, err)
+	}
+	if n > 0 {
+		return fmt.Errorf("flavor %s in use: %w", name, core.ErrInvalidRequest)
+	}
+	if err := s.withTimeout(ctx).Delete(&flavorRow{}, "name = ?", name).Error; err != nil {
+		return fmt.Errorf("delete flavor %s: %w", name, err)
+	}
+	return nil
+}
+
 var (
 	_ core.InstanceStore = (*Store)(nil)
 	_ core.NodeStore     = (*Store)(nil)
+	_ core.FlavorStore   = (*Store)(nil)
 )

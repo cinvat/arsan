@@ -22,7 +22,7 @@ func setup(t *testing.T) (*Service, *memory.Store) {
 	ctx := context.Background()
 	if _, err := st.Register(ctx, core.Node{
 		ID: "n-1", Name: "compute-1", Enabled: true,
-		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 100},
+		Total: core.Resources{CPU: 8, RAM: 16, Disk: 100},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func pending(t *testing.T, st *memory.Store, name string) core.Instance {
 	t.Helper()
 	inst, err := st.Create(context.Background(), core.Instance{
 		ID: name, Name: name,
-		Flavor:   core.Flavor{Name: "m1", VCPU: 1, RAM: 2, Disk: 10},
+		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
 		ImageRef: "cirros",
 		State:    core.StatePending,
 	})
@@ -80,7 +80,7 @@ func TestBuildLifecycle(t *testing.T) {
 		t.Fatalf("node = %s, want n-1", got.NodeID)
 	}
 	n, _ := st.GetNode(ctx, "n-1")
-	if n.Available.VCPU != 7 {
+	if n.Available.CPU != 7 {
 		t.Fatalf("available = %+v, want the claim held", n.Available)
 	}
 }

@@ -22,7 +22,17 @@ var createCmd = &cobra.Command{
 			return err
 		}
 		for _, m := range manifests {
-			vm, err := c.CreateVirtualMachine(m.Metadata.Name, m.Spec.Image, m.Spec.Flavor)
+			if m.Kind == "Flavor" {
+				vcpu, memory, disk := flavorArgs(m)
+				f, err := c.CreateFlavor(m.Metadata.Name, vcpu, memory, disk)
+				if err != nil {
+					return fmt.Errorf("%s: %w", m.Metadata.Name, err)
+				}
+				fmt.Printf("flavor/%s created\n", f.Name)
+				continue
+			}
+			ref, inline := flavorOf(m)
+			vm, err := c.CreateVirtualMachine(m.Metadata.Name, m.Spec.Image, ref, inline)
 			if err != nil {
 				return fmt.Errorf("%s: %w", m.Metadata.Name, err)
 			}
@@ -89,9 +99,19 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 		for _, m := range manifests {
+			if m.Kind == "Flavor" {
+				vcpu, memory, disk := flavorArgs(m)
+				f, err := c.CreateFlavor(m.Metadata.Name, vcpu, memory, disk)
+				if err != nil {
+					return fmt.Errorf("%s: %w", m.Metadata.Name, err)
+				}
+				fmt.Printf("flavor/%s created\n", f.Name)
+				continue
+			}
+			ref, inline := flavorOf(m)
 			vm, err := c.findByName(m.Metadata.Name)
 			if err != nil {
-				created, cerr := c.CreateVirtualMachine(m.Metadata.Name, m.Spec.Image, m.Spec.Flavor)
+				created, cerr := c.CreateVirtualMachine(m.Metadata.Name, m.Spec.Image, ref, inline)
 				if cerr != nil {
 					return fmt.Errorf("%s: %w", m.Metadata.Name, cerr)
 				}
@@ -105,7 +125,7 @@ var applyCmd = &cobra.Command{
 			if err := c.DeleteVirtualMachine(vm.ID); err != nil {
 				return fmt.Errorf("%s: %w", m.Metadata.Name, err)
 			}
-			created, err := c.CreateVirtualMachine(m.Metadata.Name, m.Spec.Image, m.Spec.Flavor)
+			created, err := c.CreateVirtualMachine(m.Metadata.Name, m.Spec.Image, ref, inline)
 			if err != nil {
 				return fmt.Errorf("%s: %w", m.Metadata.Name, err)
 			}

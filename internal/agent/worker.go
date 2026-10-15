@@ -36,6 +36,7 @@ type Request struct {
 	NodeID       string      `json:"node_id,omitempty"`
 	Name         string      `json:"name,omitempty"`
 	Flavor       core.Flavor `json:"flavor,omitempty"`
+	PinnedCPUs   []int       `json:"pinned_cpus,omitempty"`
 	ImageRef     string      `json:"image_ref,omitempty"`
 	TargetNodeID string      `json:"target_node_id,omitempty"`
 }
@@ -116,7 +117,7 @@ func (w *Worker) exec(ctx context.Context, req Request) (Response, error) {
 	case OpCreate:
 		info, err := w.driver.Create(ctx, core.CreateRequest{
 			InstanceID: req.InstanceID, NodeID: req.NodeID, Name: req.Name,
-			Flavor: req.Flavor, ImageRef: req.ImageRef,
+			Flavor: req.Flavor, PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
 		})
 		if err != nil {
 			return Response{}, err

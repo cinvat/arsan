@@ -1,0 +1,28 @@
+# Flavors: vcpu topology (sockets/cores/threads), memory and disk in MB or GB.
+# dedicated: true pins exclusive host CPUs (no overcommit); default shares.
+apiVersion: v1alpha1
+kind: Flavor
+metadata:
+  name: m1.small
+spec:
+  vcpu: {sockets: 1, cores: 1, threads: 1}
+  memory: 32MB
+  disk: 10GB
+---
+apiVersion: v1alpha1
+kind: Flavor
+metadata:
+  name: m1.medium
+spec:
+  vcpu: {sockets: 1, cores: 2, threads: 1}
+  memory: 2GB
+  disk: 20GB
+---
+apiVersion: v1alpha1
+kind: Flavor
+metadata:
+  name: m1.dedicated
+spec:
+  vcpu: {sockets: 1, cores: 4, threads: 1, dedicated: true}
+  memory: 8GB
+  disk: 40GB

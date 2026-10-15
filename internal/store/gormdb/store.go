@@ -28,6 +28,7 @@ package gormdb
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,19 +97,24 @@ func clampAdd(column, ceiling string, delta int) clause.Expr {
 // ------------------------------------------------------------------ models
 
 type instanceRow struct {
-	ID            string `gorm:"primaryKey;size:64"`
-	Name          string `gorm:"size:255;index"`
-	FlavorName    string `gorm:"size:64"`
-	FlavorVCPU    int    `gorm:"column:flavor_vcpu"`
-	FlavorRAM     int    `gorm:"column:flavor_ram"`
-	FlavorDisk    int    `gorm:"column:flavor_disk"`
-	ImageRef      string `gorm:"size:512"`
-	State         string `gorm:"size:32;index"`
-	NodeID        string `gorm:"size:64;index"`
-	Generation    int
-	FailureReason string `gorm:"size:1024"`
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	ID              string `gorm:"primaryKey;size:64"`
+	Name            string `gorm:"size:255;index"`
+	FlavorName      string `gorm:"size:64"`
+	FlavorVCPU      int    `gorm:"column:flavor_vcpu"` // legacy count; topology columns below are canonical
+	FlavorSockets   int    `gorm:"column:flavor_sockets"`
+	FlavorCores     int    `gorm:"column:flavor_cores"`
+	FlavorThreads   int    `gorm:"column:flavor_threads"`
+	FlavorDedicated bool   `gorm:"column:flavor_dedicated"`
+	FlavorRAM       int    `gorm:"column:flavor_ram"`
+	FlavorDisk      int    `gorm:"column:flavor_disk"`
+	PinnedCPUs      string `gorm:"column:pinned_cpus;type:text"` // comma-separated, dedicated only
+	ImageRef        string `gorm:"size:512"`
+	State           string `gorm:"size:32;index"`
+	NodeID          string `gorm:"size:64;index"`
+	Generation      int
+	FailureReason   string `gorm:"size:1024"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 func (instanceRow) TableName() string { return "instances" }
@@ -135,7 +141,8 @@ type nodeRow struct {
 	UsageVCPU      int    `gorm:"column:usage_vcpu"`
 	UsageRAM       int    `gorm:"column:usage_ram"`
 	UsageDisk      int    `gorm:"column:usage_disk"`
-	Instances      string `gorm:"type:text"` // comma-separated
+	Instances      string `gorm:"type:text"`                    // comma-separated
+	PinnedCPUs     string `gorm:"column:pinned_cpus;type:text"` // comma-separated exclusive CPUs
 	LastHeartbeat  time.Time
 	NotReadyReason string `gorm:"size:512"`
 	CreatedAt      time.Time
@@ -144,8 +151,38 @@ type nodeRow struct {
 
 func (nodeRow) TableName() string { return "nodes" }
 
+type flavorRow struct {
+	Name      string `gorm:"primaryKey;size:64"`
+	VCPU      int    `gorm:"column:vcpu"` // legacy count; topology columns below are canonical
+	Sockets   int    `gorm:"column:sockets"`
+	Cores     int    `gorm:"column:cores"`
+	Threads   int    `gorm:"column:threads"`
+	Dedicated bool   `gorm:"column:dedicated"`
+	RAM       int    `gorm:"column:ram"`
+	Disk      int    `gorm:"column:disk"`
+}
+
+func toFlavor(r flavorRow) core.Flavor {
+	vcpu := core.VCPU{Sockets: r.Sockets, Cores: r.Cores, Threads: r.Threads, Dedicated: r.Dedicated}
+	if vcpu.Count() <= 0 && r.VCPU > 0 {
+		vcpu = core.VCPUCount(r.VCPU)
+	}
+	return core.Flavor{Name: r.Name, VCPU: vcpu, RAM: r.RAM, Disk: r.Disk}
+}
+
+func fromFlavor(f core.Flavor) flavorRow {
+	return flavorRow{
+		Name: f.Name, VCPU: f.VCPU.Count(),
+		Sockets: f.VCPU.Sockets, Cores: f.VCPU.Cores,
+		Threads: f.VCPU.Threads, Dedicated: f.VCPU.Dedicated,
+		RAM: f.RAM, Disk: f.Disk,
+	}
+}
+
+func (flavorRow) TableName() string { return "flavors" }
+
 func (s *Store) migrate() error {
-	if err := s.db.AutoMigrate(&instanceRow{}, &nodeRow{}); err != nil {
+	if err := s.db.AutoMigrate(&instanceRow{}, &nodeRow{}, &flavorRow{}); err != nil {
 		return fmt.Errorf("gormdb: migrate: %w", err)
 	}
 	return nil
@@ -154,10 +191,22 @@ func (s *Store) migrate() error {
 // ------------------------------------------------------------- conversions
 
 func toInstance(r instanceRow) core.Instance {
+	vcpu := core.VCPU{
+		Sockets:   r.FlavorSockets,
+		Cores:     r.FlavorCores,
+		Threads:   r.FlavorThreads,
+		Dedicated: r.FlavorDedicated,
+	}
+	if vcpu.Count() <= 0 && r.FlavorVCPU > 0 {
+		// Rows written before topology columns existed carry only the
+		// count; read them back as one socket of N cores, shared.
+		vcpu = core.VCPUCount(r.FlavorVCPU)
+	}
 	return core.Instance{
 		ID:            r.ID,
 		Name:          r.Name,
-		Flavor:        core.Flavor{Name: r.FlavorName, VCPU: r.FlavorVCPU, RAM: r.FlavorRAM, Disk: r.FlavorDisk},
+		Flavor:        core.Flavor{Name: r.FlavorName, VCPU: vcpu, RAM: r.FlavorRAM, Disk: r.FlavorDisk},
+		PinnedCPUs:    splitInts(r.PinnedCPUs),
 		ImageRef:      r.ImageRef,
 		State:         core.InstanceState(r.State),
 		NodeID:        r.NodeID,
@@ -170,19 +219,24 @@ func toInstance(r instanceRow) core.Instance {
 
 func fromInstance(i core.Instance) instanceRow {
 	return instanceRow{
-		ID:            i.ID,
-		Name:          i.Name,
-		FlavorName:    i.Flavor.Name,
-		FlavorVCPU:    i.Flavor.VCPU,
-		FlavorRAM:     i.Flavor.RAM,
-		FlavorDisk:    i.Flavor.Disk,
-		ImageRef:      i.ImageRef,
-		State:         string(i.State),
-		NodeID:        i.NodeID,
-		Generation:    i.Generation,
-		FailureReason: i.FailureReason,
-		CreatedAt:     i.CreatedAt,
-		UpdatedAt:     i.UpdatedAt,
+		ID:              i.ID,
+		Name:            i.Name,
+		FlavorName:      i.Flavor.Name,
+		FlavorVCPU:      i.Flavor.VCPU.Count(),
+		FlavorSockets:   i.Flavor.VCPU.Sockets,
+		FlavorCores:     i.Flavor.VCPU.Cores,
+		FlavorThreads:   i.Flavor.VCPU.Threads,
+		FlavorDedicated: i.Flavor.VCPU.Dedicated,
+		FlavorRAM:       i.Flavor.RAM,
+		FlavorDisk:      i.Flavor.Disk,
+		PinnedCPUs:      joinInts(i.PinnedCPUs),
+		ImageRef:        i.ImageRef,
+		State:           string(i.State),
+		NodeID:          i.NodeID,
+		Generation:      i.Generation,
+		FailureReason:   i.FailureReason,
+		CreatedAt:       i.CreatedAt,
+		UpdatedAt:       i.UpdatedAt,
 	}
 }
 
@@ -198,10 +252,11 @@ func toNode(r nodeRow) core.Node {
 		State:          core.NodeState(r.State),
 		Enabled:        r.Enabled,
 		Driver:         r.Driver,
-		Total:          core.Resources{VCPU: r.TotalVCPU, RAM: r.TotalRAM, Disk: r.TotalDisk},
-		Available:      core.Resources{VCPU: r.AvailableVCPU, RAM: r.AvailableRAM, Disk: r.AvailableDisk},
-		Usage:          core.Resources{VCPU: r.UsageVCPU, RAM: r.UsageRAM, Disk: r.UsageDisk},
+		Total:          core.Resources{CPU: r.TotalVCPU, RAM: r.TotalRAM, Disk: r.TotalDisk},
+		Available:      core.Resources{CPU: r.AvailableVCPU, RAM: r.AvailableRAM, Disk: r.AvailableDisk},
+		Usage:          core.Resources{CPU: r.UsageVCPU, RAM: r.UsageRAM, Disk: r.UsageDisk},
 		Instances:      ids,
+		PinnedCPUs:     splitInts(r.PinnedCPUs),
 		LastHeartbeat:  r.LastHeartbeat,
 		NotReadyReason: r.NotReadyReason,
 	}
@@ -215,16 +270,17 @@ func fromNode(n core.Node) nodeRow {
 		State:          string(n.State),
 		Enabled:        n.Enabled,
 		Driver:         n.Driver,
-		TotalVCPU:      n.Total.VCPU,
+		TotalVCPU:      n.Total.CPU,
 		TotalRAM:       n.Total.RAM,
 		TotalDisk:      n.Total.Disk,
-		AvailableVCPU:  n.Available.VCPU,
+		AvailableVCPU:  n.Available.CPU,
 		AvailableRAM:   n.Available.RAM,
 		AvailableDisk:  n.Available.Disk,
-		UsageVCPU:      n.Usage.VCPU,
+		UsageVCPU:      n.Usage.CPU,
 		UsageRAM:       n.Usage.RAM,
 		UsageDisk:      n.Usage.Disk,
 		Instances:      joinList(n.Instances),
+		PinnedCPUs:     joinInts(n.PinnedCPUs),
 		LastHeartbeat:  n.LastHeartbeat,
 		NotReadyReason: n.NotReadyReason,
 	}
@@ -241,6 +297,31 @@ func splitList(s string) []string {
 		return nil
 	}
 	return strings.Split(s, ",")
+}
+
+// joinInts/splitInts persist CPU sets the same comma-separated way node
+// membership is stored: one text column, no join table, parsed whole.
+func joinInts(nums []int) string {
+	parts := make([]string, 0, len(nums))
+	for _, n := range nums {
+		parts = append(parts, strconv.Itoa(n))
+	}
+	return strings.Join(parts, ",")
+}
+
+func splitInts(s string) []int {
+	if s == "" {
+		return nil
+	}
+	var out []int
+	for _, p := range strings.Split(s, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // withTimeout binds a store call to the caller's context, so cancellation and

@@ -40,6 +40,7 @@ type Logger interface {
 type Stores interface {
 	core.InstanceStore
 	core.NodeStore
+	core.FlavorStore
 }
 
 // Controller is the business-logic half: placement, the instance state machine,

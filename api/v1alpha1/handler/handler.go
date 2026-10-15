@@ -16,10 +16,11 @@ import (
 type Handler struct {
 	instances core.InstanceService
 	nodes     core.NodeService
+	flavors   core.FlavorService
 }
 
-func New(instances core.InstanceService, nodes core.NodeService) *Handler {
-	return &Handler{instances: instances, nodes: nodes}
+func New(instances core.InstanceService, nodes core.NodeService, flavors core.FlavorService) *Handler {
+	return &Handler{instances: instances, nodes: nodes, flavors: flavors}
 }
 
 func Health(c *gin.Context) {
@@ -112,6 +113,52 @@ func (h *Handler) StopVirtualMachine(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "stopped"})
 }
 
+func (h *Handler) CreateFlavor(c *gin.Context) {
+	var req core.CreateFlavorRequest
+	if !bind(c, &req) {
+		return
+	}
+	if req.Name == "" {
+		writeErr(c, core.ErrInvalidRequest)
+		return
+	}
+	f, err := h.flavors.Create(c.Request.Context(), req)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, f)
+}
+
+func (h *Handler) ListFlavors(c *gin.Context) {
+	out, err := h.flavors.List(c.Request.Context())
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	if out == nil {
+		out = []core.Flavor{}
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (h *Handler) GetFlavor(c *gin.Context) {
+	f, err := h.flavors.Get(c.Request.Context(), c.Param("name"))
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, f)
+}
+
+func (h *Handler) DeleteFlavor(c *gin.Context) {
+	if err := h.flavors.Delete(c.Request.Context(), c.Param("name")); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 // ----------------------------------------------------------------- helpers
 
 func bind(c *gin.Context, dst any) bool {
@@ -138,7 +185,7 @@ func writeErr(c *gin.Context, err error) {
 		write(c, http.StatusConflict, "no_valid_host", err)
 	case errors.Is(err, core.ErrCapacityConflict):
 		write(c, http.StatusConflict, "capacity_conflict", err)
-	case errors.Is(err, core.ErrInstanceNotFound), errors.Is(err, core.ErrNodeNotFound):
+	case errors.Is(err, core.ErrInstanceNotFound), errors.Is(err, core.ErrNodeNotFound), errors.Is(err, core.ErrFlavorNotFound):
 		write(c, http.StatusNotFound, "not_found", err)
 	case errors.Is(err, core.ErrUnsupportedPlatform):
 		write(c, http.StatusFailedDependency, "unsupported_platform", err)

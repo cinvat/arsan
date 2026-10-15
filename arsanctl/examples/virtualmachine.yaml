@@ -1,0 +1,7 @@
+apiVersion: v1alpha1
+kind: VirtualMachine
+metadata:
+  name: web1
+spec:
+  image: https://example.com/base.qcow2
+  flavorRef: m1.small

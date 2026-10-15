@@ -39,7 +39,7 @@ func mustInstance(t *testing.T, s *Store, id string, state core.InstanceState) c
 	t.Helper()
 	i, err := s.Create(t.Context(), core.Instance{
 		ID: id, Name: id, State: state,
-		Flavor: core.Flavor{Name: "m1.small", VCPU: 1, RAM: 2, Disk: 10},
+		Flavor: core.Flavor{Name: "m1.small", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
 	})
 	if err != nil {
 		t.Fatalf("create %s: %v", id, err)
@@ -121,9 +121,9 @@ func TestUpdateAllowsMetadata(t *testing.T) {
 
 func TestReserveDecrementsAllDimensions(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 8, RAM: 16, Disk: 200})
+	mustNode(t, s, "n-1", core.Resources{CPU: 8, RAM: 16, Disk: 200})
 
-	if err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{VCPU: 2, RAM: 4, Disk: 20}); err != nil {
+	if err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{CPU: 2, RAM: 4, Disk: 20}); err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
 
@@ -131,7 +131,7 @@ func TestReserveDecrementsAllDimensions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := core.Resources{VCPU: 6, RAM: 12, Disk: 180}
+	want := core.Resources{CPU: 6, RAM: 12, Disk: 180}
 	if n.Available != want {
 		t.Fatalf("available = %+v, want %+v", n.Available, want)
 	}
@@ -140,22 +140,22 @@ func TestReserveDecrementsAllDimensions(t *testing.T) {
 // All-or-nothing: a request that fits in vCPU but not RAM must change nothing.
 func TestReserveIsAllOrNothing(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 8, RAM: 4, Disk: 200})
+	mustNode(t, s, "n-1", core.Resources{CPU: 8, RAM: 4, Disk: 200})
 
-	err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{VCPU: 1, RAM: 8, Disk: 20})
+	err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{CPU: 1, RAM: 8, Disk: 20})
 	if !errors.Is(err, core.ErrCapacityConflict) {
 		t.Fatalf("got %v, want ErrCapacityConflict", err)
 	}
 
 	n, _ := s.GetNode(t.Context(), "n-1")
-	if n.Available != (core.Resources{VCPU: 8, RAM: 4, Disk: 200}) {
+	if n.Available != (core.Resources{CPU: 8, RAM: 4, Disk: 200}) {
 		t.Fatalf("available = %+v; a refused reservation must mutate nothing", n.Available)
 	}
 }
 
 func TestReserveMissingNode(t *testing.T) {
 	s := newStore(t)
-	err := s.ReserveNodeResources(t.Context(), "ghost", core.Resources{VCPU: 1})
+	err := s.ReserveNodeResources(t.Context(), "ghost", core.Resources{CPU: 1})
 	if !errors.Is(err, core.ErrNodeNotFound) {
 		t.Fatalf("got %v, want ErrNodeNotFound", err)
 	}
@@ -165,7 +165,7 @@ func TestReserveMissingNode(t *testing.T) {
 // amount of capacity, and an exact expected number of winners.
 func TestConcurrentReservationsNeverOvercommit(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 2, RAM: 4, Disk: 10})
+	mustNode(t, s, "n-1", core.Resources{CPU: 2, RAM: 4, Disk: 10})
 
 	const racers = 40
 	var won atomic.Int64
@@ -178,7 +178,7 @@ func TestConcurrentReservationsNeverOvercommit(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{VCPU: 1, RAM: 1, Disk: 1})
+			err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{CPU: 1, RAM: 1, Disk: 1})
 			switch {
 			case err == nil:
 				won.Add(1)
@@ -200,7 +200,7 @@ func TestConcurrentReservationsNeverOvercommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n.Available != (core.Resources{VCPU: 0, RAM: 2, Disk: 8}) {
+	if n.Available != (core.Resources{CPU: 0, RAM: 2, Disk: 8}) {
 		t.Fatalf("available = %+v, want the capacity to be fully consumed", n.Available)
 	}
 }
@@ -209,12 +209,12 @@ func TestConcurrentReservationsNeverOvercommit(t *testing.T) {
 
 func TestReleaseReturnsCapacityAndClampsToTotal(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 4, RAM: 8, Disk: 40})
+	mustNode(t, s, "n-1", core.Resources{CPU: 4, RAM: 8, Disk: 40})
 
-	if err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{VCPU: 2, RAM: 4, Disk: 20}); err != nil {
+	if err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{CPU: 2, RAM: 4, Disk: 20}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReleaseNodeResources(t.Context(), "n-1", core.Resources{VCPU: 2, RAM: 4, Disk: 20}); err != nil {
+	if err := s.ReleaseNodeResources(t.Context(), "n-1", core.Resources{CPU: 2, RAM: 4, Disk: 20}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -224,7 +224,7 @@ func TestReleaseReturnsCapacityAndClampsToTotal(t *testing.T) {
 	}
 
 	// Releasing again must not invent capacity beyond the node's total.
-	if err := s.ReleaseNodeResources(t.Context(), "n-1", core.Resources{VCPU: 2, RAM: 4, Disk: 20}); err != nil {
+	if err := s.ReleaseNodeResources(t.Context(), "n-1", core.Resources{CPU: 2, RAM: 4, Disk: 20}); err != nil {
 		t.Fatal(err)
 	}
 	n, _ = s.GetNode(t.Context(), "n-1")
@@ -235,7 +235,7 @@ func TestReleaseReturnsCapacityAndClampsToTotal(t *testing.T) {
 
 func TestReleaseReservationsIsIdempotent(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 4, RAM: 8, Disk: 40})
+	mustNode(t, s, "n-1", core.Resources{CPU: 4, RAM: 8, Disk: 40})
 	mustInstance(t, s, "i-1", core.StateActive)
 
 	for i := 0; i < 3; i++ {
@@ -262,15 +262,15 @@ func TestReleaseReservationsIsIdempotent(t *testing.T) {
 
 func TestRegisterIsAnUpsert(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 8, RAM: 16, Disk: 200})
-	if err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{VCPU: 2, RAM: 4, Disk: 20}); err != nil {
+	mustNode(t, s, "n-1", core.Resources{CPU: 8, RAM: 16, Disk: 200})
+	if err := s.ReserveNodeResources(t.Context(), "n-1", core.Resources{CPU: 2, RAM: 4, Disk: 20}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Re-register: capacity and state must survive.
 	_, err := s.Register(t.Context(), core.Node{
 		ID: "n-1", Name: "n-1-renamed",
-		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 200},
+		Total: core.Resources{CPU: 8, RAM: 16, Disk: 200},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -280,7 +280,7 @@ func TestRegisterIsAnUpsert(t *testing.T) {
 	if n.Name != "n-1-renamed" {
 		t.Errorf("name = %q, want it refreshed", n.Name)
 	}
-	if n.Available != (core.Resources{VCPU: 6, RAM: 12, Disk: 180}) {
+	if n.Available != (core.Resources{CPU: 6, RAM: 12, Disk: 180}) {
 		t.Errorf("available = %+v, want the reservation preserved across a re-register", n.Available)
 	}
 }
@@ -294,10 +294,10 @@ func TestRegisterIsAnUpsert(t *testing.T) {
 // through the compute engine.
 func TestRecordUsageNeverChangesState(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 4, RAM: 8, Disk: 40})
+	mustNode(t, s, "n-1", core.Resources{CPU: 4, RAM: 8, Disk: 40})
 
 	// A fresh node stays NOTREADY: it has claimed nothing yet.
-	if _, err := s.RecordUsage(t.Context(), "n-1", core.Resources{VCPU: 1, RAM: 2, Disk: 5}, now()); err != nil {
+	if _, err := s.RecordUsage(t.Context(), "n-1", core.Resources{CPU: 1, RAM: 2, Disk: 5}, now()); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := s.GetNode(t.Context(), "n-1"); n.State.Ready() {
@@ -334,9 +334,9 @@ func TestRecordUsageNeverChangesState(t *testing.T) {
 // Reported usage is informational and must not move available capacity.
 func TestRecordUsageDoesNotChangeAvailability(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 8, RAM: 16, Disk: 200})
+	mustNode(t, s, "n-1", core.Resources{CPU: 8, RAM: 16, Disk: 200})
 
-	if _, err := s.RecordUsage(t.Context(), "n-1", core.Resources{VCPU: 7, RAM: 15, Disk: 199}, now()); err != nil {
+	if _, err := s.RecordUsage(t.Context(), "n-1", core.Resources{CPU: 7, RAM: 15, Disk: 199}, now()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -344,14 +344,14 @@ func TestRecordUsageDoesNotChangeAvailability(t *testing.T) {
 	if n.Available != n.Total {
 		t.Fatalf("available = %+v; a usage report must not change reservations", n.Available)
 	}
-	if n.Usage.VCPU != 7 {
+	if n.Usage.CPU != 7 {
 		t.Fatalf("usage = %+v, want it recorded", n.Usage)
 	}
 }
 
 func TestAttachAndDetach(t *testing.T) {
 	s := newStore(t)
-	mustNode(t, s, "n-1", core.Resources{VCPU: 4, RAM: 8, Disk: 40})
+	mustNode(t, s, "n-1", core.Resources{CPU: 4, RAM: 8, Disk: 40})
 
 	for _, id := range []string{"i-1", "i-2", "i-3"} {
 		if err := s.AttachInstance(t.Context(), "n-1", id); err != nil {
@@ -407,7 +407,7 @@ func TestSetStateMissingNode(t *testing.T) {
 func TestListIsOrdered(t *testing.T) {
 	s := newStore(t)
 	for _, id := range []string{"n-3", "n-1", "n-2"} {
-		mustNode(t, s, id, core.Resources{VCPU: 1, RAM: 1, Disk: 1})
+		mustNode(t, s, id, core.Resources{CPU: 1, RAM: 1, Disk: 1})
 	}
 	nodes, err := s.ListNodes(t.Context())
 	if err != nil {
@@ -444,7 +444,7 @@ func TestRecordUsageDoesNotSetReadiness(t *testing.T) {
 
 	if _, err := s.Register(ctx, core.Node{
 		ID: "n1", Name: "compute-1", Enabled: true,
-		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 100},
+		Total: core.Resources{CPU: 8, RAM: 16, Disk: 100},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +455,7 @@ func TestRecordUsageDoesNotSetReadiness(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ {
-		if _, err := s.RecordUsage(ctx, "n1", core.Resources{VCPU: 1, RAM: 1, Disk: 1}, time.Now().UTC()); err != nil {
+		if _, err := s.RecordUsage(ctx, "n1", core.Resources{CPU: 1, RAM: 1, Disk: 1}, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -470,7 +470,7 @@ func TestRecordUsageDoesNotSetReadiness(t *testing.T) {
 	if n.LastHeartbeat.IsZero() {
 		t.Fatal("heartbeat should still be recorded")
 	}
-	if n.Usage.VCPU != 1 {
+	if n.Usage.CPU != 1 {
 		t.Fatalf("usage = %+v, want it recorded", n.Usage)
 	}
 }
@@ -483,14 +483,14 @@ func TestMemoryRecordUsageDoesNotSetReadiness(t *testing.T) {
 
 	if _, err := s.Register(ctx, core.Node{
 		ID: "n1", Name: "compute-1", Enabled: true,
-		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 100},
+		Total: core.Resources{CPU: 8, RAM: 16, Disk: 100},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.SetReadiness(ctx, "n1", core.NodeNotReady, "probe failed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordUsage(ctx, "n1", core.Resources{VCPU: 1}, time.Now().UTC()); err != nil {
+	if _, err := s.RecordUsage(ctx, "n1", core.Resources{CPU: 1}, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 
