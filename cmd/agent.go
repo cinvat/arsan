@@ -78,7 +78,7 @@ var agentCmd = &cobra.Command{
 
 func init() {
 	agentCmd.Flags().String("node.name", "", "Node name; defaults to the hostname")
-	agentCmd.Flags().String("driver", "fake", "compute engine (fake, kvm, esxi)")
+	agentCmd.Flags().String("driver", "fake", "compute engine (fake, kvm)")
 	agentCmd.Flags().String("bus.url", "nats://127.0.0.1:4222", "NATS URL for the command bus")
 	agentCmd.Flags().String("api.url", "http://127.0.0.1:8080", "control plane REST API to bootstrap against")
 	// Default is empty on purpose: a built-in token value would be a

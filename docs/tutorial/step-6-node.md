@@ -12,7 +12,7 @@ Following the Kubernetes model, since that is the shape this mirrors:
 |------|-------|
 | **Node** | the machine: capacity, readiness, address. Identified by hostname. |
 | **Agent** | the process running on a node. Owns the compute engine. |
-| **Engine** | what actually creates VMs: `fake`, `kvm`, `esxi`. Only agents have one. |
+| **Engine** | what actually creates VMs: `fake`, `kvm`. Only agents have one. |
 
 The agent is named after its node, exactly as a kubelet reports the node it
 runs on. There is no separate "host" concept — that was a third word for Node

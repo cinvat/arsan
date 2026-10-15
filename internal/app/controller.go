@@ -81,7 +81,7 @@ func NewController(cfg Config, commands bus.Bus, log Logger) (*Controller, error
 // KVM, nothing to place a VM on directly: every VM lives on some agent, and the
 // controller's entire job is to choose which agent and then command it. So this
 // returns a core.Driver that forwards to the agent's gRPC service, which is
-// where the real engine (fake, kvm, esxi) actually runs.
+// where the real engine (fake, kvm) actually runs.
 //
 // There is deliberately no controller-side engine choice. The engine is a
 // property of the node, declared by the agent when it bootstrapped and recorded

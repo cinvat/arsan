@@ -11,7 +11,7 @@ lifecycle via pluggable compute engines.
 **One binary, three cobra subcommands:** `api`, `controller`, `agent`.
 
 **Compute engines:** `fake` (in-memory, every platform), `kvm` (native
-`libvirt.org/go/libvirt` bindings, Linux), `esxi` (VMware ESXi, future).
+`libvirt.org/go/libvirt` bindings, Linux).
 
 ## Layout
 
