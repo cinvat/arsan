@@ -244,9 +244,9 @@ func (d *Driver) Migrate(_ context.Context, _, _ string) error {
 }
 
 // HostCapacity reports what the host actually has: CPUs and memory from the
-// node itself. Disk is not reported by libvirt at this level, so it is zero;
-// placement still accounts disk through reservations, and a zero here only
-// means "unknown", never "none".
+// node, free disk summed over the active storage pools. No pools, or none
+// active, means zero disk — placement still accounts disk through
+// reservations, and a zero here only means "unknown", never "none".
 func (d *Driver) HostCapacity(ctx context.Context) (core.Resources, error) {
 	var out core.Resources
 	err := d.do(ctx, func() error {
@@ -255,6 +255,30 @@ func (d *Driver) HostCapacity(ctx context.Context) (core.Resources, error) {
 			return err
 		}
 		out = core.Resources{VCPU: int(info.Cpus), RAM: int(info.Memory / (1024 * 1024))}
+		pools, err := d.conn.ListAllStoragePools(0)
+		if err != nil {
+			return err
+		}
+		var diskBytes uint64
+		for i := range pools {
+			pool := &pools[i]
+			active, err := pool.IsActive()
+			if err != nil {
+				pool.Free()
+				continue
+			}
+			if !active {
+				pool.Free()
+				continue
+			}
+			pinfo, err := pool.GetInfo()
+			pool.Free()
+			if err != nil {
+				continue
+			}
+			diskBytes += pinfo.Available
+		}
+		out.Disk = int(diskBytes / (1024 * 1024 * 1024))
 		return nil
 	})
 	return out, err
