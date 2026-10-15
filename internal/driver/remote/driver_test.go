@@ -1,37 +1,43 @@
 package remote
 
 import (
-	"net"
+	"context"
 	"testing"
 
-	"google.golang.org/grpc"
-
 	"github.com/cinvat/arsan/internal/agent"
+	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/internal/driver/fake"
 )
 
-// serve starts a real agent server over a real socket. The structs cross it as
-// JSON (see agent/codec.go), so this is the test that proves both ends agree.
-func serve(t *testing.T) string {
-	t.Helper()
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := grpc.NewServer()
-	agent.RegisterServer(srv, agent.NewAgentServer(fake.New()))
-	go srv.Serve(lis)
-	t.Cleanup(srv.Stop)
-	return lis.Addr().String()
+// loopback routes requests straight into a worker: the full protocol, no
+// transport at all. Transport is NATS' job and NATS tests live in
+// internal/bus; what matters here is that both ends agree on the envelope.
+type loopback struct {
+	worker *agent.Worker
 }
 
-// The full engine path the controller uses: remote driver -> gRPC -> engine.
+func (l *loopback) Publish(context.Context, bus.Command) error      { return nil }
+func (l *loopback) PublishAsync(context.Context, bus.Command) error { return nil }
+func (l *loopback) Subscribe(ctx context.Context, topic string, h bus.Handler) (func(), error) {
+	return func() {}, nil
+}
+func (l *loopback) SubscribeAs(ctx context.Context, topic, _ string, h bus.Handler) (func(), error) {
+	return func() {}, nil
+}
+func (l *loopback) Request(ctx context.Context, _ string, payload []byte) ([]byte, error) {
+	return l.worker.Handle(ctx, payload), nil
+}
+func (l *loopback) Close() error { return nil }
+
+func dial(t *testing.T) *Driver {
+	t.Helper()
+	return New("n-1", &loopback{worker: agent.NewWorker("n-1", fake.New())})
+}
+
+// The full engine path the controller uses: remote driver -> bus -> engine.
 func TestRemoteDriverRoundTrip(t *testing.T) {
-	d, err := New("n-1", serve(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := dial(t)
 	ctx := t.Context()
 	flavor := core.Flavor{Name: "m1", VCPU: 1, RAM: 2, Disk: 10}
 
@@ -64,12 +70,20 @@ func TestRemoteDriverRoundTrip(t *testing.T) {
 // A retried delete is a no-op: the engine, not the transport, owns
 // idempotency, and this proves the round trip preserves it.
 func TestRemoteDeleteIsIdempotent(t *testing.T) {
-	d, err := New("n-1", serve(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := t.Context()
-	if err := d.Delete(ctx, "never-existed"); err != nil {
+	d := dial(t)
+	if err := d.Delete(t.Context(), "never-existed"); err != nil {
 		t.Fatalf("delete of a missing instance must succeed: %v", err)
+	}
+}
+
+// Info is how the controller learns the engine and capacity after the probe.
+func TestRemoteInfo(t *testing.T) {
+	d := dial(t)
+	engine, _, err := d.Info(t.Context())
+	if err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	if engine != "fake" {
+		t.Fatalf("engine = %q, want fake", engine)
 	}
 }

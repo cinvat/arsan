@@ -59,6 +59,10 @@ type NodeStore interface {
 	// "it stopped answering" would be indistinguishable — and a probe must not
 	// override an operator's decision.
 	SetNodeEnabled(ctx context.Context, id string, enabled bool) (Node, error)
+	// SetNodeSpec records what the agent runs and what its host holds, as
+	// reported by the controller's probe. Bootstrap never carries this: the
+	// agent should not have to know its host to join.
+	SetNodeSpec(ctx context.Context, id string, engine string, total Resources) (Node, error)
 	// SetReadiness sets a node's readiness together with the reason it is not
 	// ready. Passing an empty reason marks it READY.
 	SetReadiness(ctx context.Context, id string, state NodeState, reason string) (Node, error)
@@ -118,11 +122,7 @@ type Scheduler interface {
 }
 
 type RegisterNodeRequest struct {
-	Name    string    `json:"name"`
-	Arch    string    `json:"arch"`
-	Driver  string    `json:"driver"`
-	Address string    `json:"address"`
-	Total   Resources `json:"total"`
+	Name string `json:"name"`
 }
 
 type NodeService interface {

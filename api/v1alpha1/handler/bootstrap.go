@@ -30,14 +30,11 @@ type Bootstrap struct {
 	Bus bus.Bus
 }
 
-// registerNodeRequest is what an agent sends on every bootstrap.
+// registerNodeRequest is what an agent sends on every bootstrap: identity
+// and nothing else.
 type registerNodeRequest struct {
-	Token   string         `json:"token"`
-	Name    string         `json:"name"`
-	Arch    string         `json:"arch"`
-	Driver  string         `json:"driver"`
-	Address string         `json:"address" binding:"required"`
-	Total   core.Resources `json:"total"`
+	Token string `json:"token"`
+	Name  string `json:"name"`
 }
 
 func (b *Bootstrap) RegisterNode(c *gin.Context) {
@@ -55,27 +52,12 @@ func (b *Bootstrap) RegisterNode(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, errBody("bad_request", errors.New("name required")))
 		return
 	}
-	if req.Total.VCPU <= 0 || req.Total.RAM <= 0 || req.Total.Disk <= 0 {
-		c.JSON(http.StatusBadRequest, errBody("bad_request", errors.New("total must be positive")))
-		return
-	}
-	if req.Address == "" {
-		c.JSON(http.StatusBadRequest, errBody("bad_request", errors.New("address required")))
-		return
-	}
 
 	ctx := c.Request.Context()
 
-	// Upsert. Re-registering an existing node refreshes its address and
-	// capacity and leaves its state and reservations alone, so an agent
-	// restarting does not reset a host that is mid-build.
-	node, err := b.Nodes.Register(ctx, core.RegisterNodeRequest{
-		Name:    req.Name,
-		Arch:    req.Arch,
-		Driver:  req.Driver,
-		Address: req.Address,
-		Total:   req.Total,
-	})
+	// Upsert. Re-registering leaves state, spec and reservations alone, so an
+	// agent restarting does not reset a host that is mid-build.
+	node, err := b.Nodes.Register(ctx, core.RegisterNodeRequest{Name: req.Name})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errBody("internal", err))
 		return
@@ -93,7 +75,7 @@ func (b *Bootstrap) RegisterNode(c *gin.Context) {
 		ID:      util.NewID("cmd"),
 		Topic:   bus.TopicNodeRegistered,
 		Target:  node.ID,
-		Payload: mustJSON(map[string]string{"address": node.Address, "driver": node.Driver}),
+		Payload: mustJSON(map[string]string{"node": node.ID}),
 	}); err != nil {
 		// Only a malformed command fails here; a slow queue does not.
 		c.JSON(http.StatusServiceUnavailable, errBody("publish_failed", err))
@@ -101,7 +83,7 @@ func (b *Bootstrap) RegisterNode(c *gin.Context) {
 	}
 
 	// The session ends here: the agent keeps no session, and every later
-	// call is the controller dialling it over gRPC.
+	// call reaches it over the bus at agent.<node-id>.
 	c.JSON(http.StatusOK, node)
 }
 

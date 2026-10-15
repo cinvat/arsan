@@ -112,15 +112,13 @@ func drain(ch chan bus.Command) {
 	}
 }
 
-// body is a valid registration for the given token.
+// body is a valid registration for the given token: identity and nothing
+// else. Capacity and engine arrive later, when the controller asks after the
+// probe succeeds.
 func body(token string) map[string]any {
 	return map[string]any{
-		"token":   token,
-		"name":    "compute-1",
-		"arch":    "amd64",
-		"driver":  "kvm",
-		"address": "10.0.0.11:9090",
-		"total":   map[string]int{"vcpu": 8, "ram": 16, "disk": 200},
+		"token": token,
+		"name":  "compute-1",
 	}
 }
 
@@ -165,11 +163,6 @@ func TestValidTokenRegistersAndNotifies(t *testing.T) {
 	}
 	if node.State != core.NodeNotReady {
 		t.Errorf("state = %q, want NOTREADY", node.State)
-	}
-	// The declared gRPC endpoint is the whole reason the agent sends it: it
-	// is how the controller reaches the agent afterwards.
-	if node.Address != "10.0.0.11:9090" {
-		t.Errorf("address = %q, want the declared endpoint", node.Address)
 	}
 
 	cmd, ok := h.waitNotice(2 * time.Second)
@@ -224,9 +217,7 @@ func TestBootstrapIsAnUpsert(t *testing.T) {
 		t.Fatalf("first: %d %s", w.Code, w.Body)
 	}
 
-	moved := body("s3cret")
-	moved["address"] = "10.0.0.11:9999"
-	second := h.post(t, moved)
+	second := h.post(t, body("s3cret"))
 	if second.Code != http.StatusOK {
 		t.Fatalf("second: %d %s", second.Code, second.Body)
 	}
@@ -238,10 +229,6 @@ func TestBootstrapIsAnUpsert(t *testing.T) {
 	if node.ID != "n-compute-1" {
 		t.Fatalf("id = %q; re-bootstrap created a second node", node.ID)
 	}
-	if node.Address != "10.0.0.11:9999" {
-		t.Fatalf("address = %q, want the new endpoint", node.Address)
-	}
-
 	all, err := h.store.ListNodes(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -254,19 +241,13 @@ func TestBootstrapIsAnUpsert(t *testing.T) {
 func TestIncompleteRequestIsRejected(t *testing.T) {
 	h := new(t, "s3cret")
 
-	cases := map[string]func(map[string]any){
-		"no address":   func(m map[string]any) { delete(m, "address") },
-		"no name":      func(m map[string]any) { delete(m, "name") },
-		"no total":     func(m map[string]any) { delete(m, "total") },
-		"zero vcpu":    func(m map[string]any) { m["total"] = map[string]int{"vcpu": 0, "ram": 8, "disk": 20} },
-		"negative ram": func(m map[string]any) { m["total"] = map[string]int{"vcpu": 8, "ram": -1, "disk": 20} },
+	// A nameless request is malformed; a tokenless one is unauthenticated.
+	// Either way the node must not be created.
+	if w := h.post(t, map[string]any{"token": "s3cret"}); w.Code != http.StatusBadRequest {
+		t.Errorf("no name: status = %d, want 400", w.Code)
 	}
-	for label, mangle := range cases {
-		payload := body("s3cret")
-		mangle(payload)
-		if w := h.post(t, payload); w.Code != http.StatusBadRequest {
-			t.Errorf("%s: status = %d, want 400", label, w.Code)
-		}
+	if w := h.post(t, map[string]any{"name": "compute-1"}); w.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", w.Code)
 	}
 }
 

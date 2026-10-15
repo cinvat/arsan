@@ -64,25 +64,23 @@ The part worth copying from Kubernetes is not the verb, it is that the node
 ```
 controller                  api                       agent
    │                          │                          │
-   │ --bootstrap.token-file   │                          │
-   │   (one secret, 0600)     │                          │
+   │ --bootstrap.token        │                          │
+   │   (one secret)           │                          │
    │                          │                          │
    │                     POST /v1alpha1/nodes            │
-   │                          │◀──── {token, name,        │
-   │                          │      arch, driver,        │
-   │                          │      address, total} ─────┤
+   │                          │◀──── {token, name} ──────┤
    │                          │                          │
    │                          │  constant-time compare   │
    │                          │  reject or accept        │
    │                          │  session ends           │
-   │                          ├──── 201 {node} ──────────┤
+   │                          ├──── 200 {node} ──────────┤
    │                          │                          │
    │                          │  upsert to node list     │
    │                          │                          │
    │                          │── publish node.registered ▶│ bus
    │◀─────────────────────────│                          │
-   │ dial agent at the address│                          │
-   │ it declared              │                          │
+   │ ask agent at agent.<id>  │                          │
+   │ (usage, then info)       │                          │
 ```
 
 No token table. There is nothing to store, because the api compares against the
@@ -103,8 +101,6 @@ the api's config, its environment, or a leaked file can join as a node until
 rotation. Keeping that acceptable:
 
 - generate with `crypto/rand`, not a human-chosen string
-- pass by **file**, never a flag — a flag is world-readable through `ps`
-- the file is checked for mode and a group- or world-readable token is refused
 - rotate on any suspicion
 
 A stored token table would fix that residual risk at the cost of state that can
@@ -120,39 +116,32 @@ POST /v1alpha1/nodes
 Content-Type: application/json
 
 {
-  "token":   "<shared bootstrap secret>",
-  "name":    "compute-1",
-  "arch":    "amd64",
-  "driver":  "kvm",
-  "address": "10.0.0.11:9090",
-  "total":   {"vcpu": 8, "ram": 16, "disk": 200}
+  "token": "<shared bootstrap secret>",
+  "name":  "compute-1"
 }
 ```
 
-`201 Created` with the stored node, or `401 Unauthorized`.
+`200 OK` with the stored node, or `401 Unauthorized`.
 
-The agent sends `address` on **every** bootstrap, so it re-announces its
-endpoint each time it starts. That is what lets the controller dial it without a
-second discovery step, and it means a node whose port changed re-registers
-correctly.
+That is the whole request. Capacity, engine and usage are fetched by the
+controller after the probe succeeds, so the agent never describes a host it
+may not know yet — and there is nothing to go stale when the host changes.
 
-The HTTP session ends at the response. Everything after is the controller
-dialling the agent's gRPC server for engine calls.
+The HTTP session ends at the response. Everything after reaches the agent over
+the bus at `agent.<node-id>`.
 
 ### Rules
 
 - **Constant-time comparison.** A byte-wise compare leaks the secret's length
   and a prefix, one byte at a time. Use `crypto/subtle`.
-- **Refuse a loose file mode.** `cmd/secret.go` rejects a token file readable by
-  group or other.
 - **The api owns authentication.** Validating a credential is authn, which is
   the api's job. It is not a business decision and never reaches the bus.
-- **A bootstrapped agent holds no credential afterwards.** The agent is the
-  gRPC server; the controller initiates those calls, so there is nothing left to
-  authenticate.
-- **An upsert, never a replace.** Re-registering refreshes address and capacity
-  and leaves state and reservations alone, so an agent restarting mid-build does
-  not reset its host.
+- **A bootstrapped agent holds no credential afterwards.** Nothing after
+  bootstrap authenticates; the agent answers on the bus and the controller
+  asks.
+- **An upsert, never a replace.** Re-registering leaves state, spec and
+  reservations alone, so an agent restarting mid-build does not reset its
+  host.
 
 ### Registration does not wait for delivery
 
@@ -171,24 +160,30 @@ Nothing can be placed on a `NOTREADY` node, so a lost announcement costs nothing
 that matters. Blocking on the ack would make an agent's start-up time depend on
 the queue's latency in exchange for no safety gain.
 
-The agent is READY only once it answers a health check over gRPC:
+The agent is READY only once it answers the probe over NATS:
 
 ```
-POST /nodes ──▶ NOTREADY ──▶ controller probes over gRPC ──▶ READY
+POST /nodes ──▶ NOTREADY ──▶ controller probes ──▶ READY
+                    │              (usage, then info)
                     │                    │
                     │                    └── no answer ──▶ NOTREADY + reason
                     └── never probed ──▶ NOTREADY + reason
 ```
 
-The **controller** probes, not the agent: the controller already dials every
-agent for engine calls, so probing costs a round trip it is already paying and
-needs no new transport in the other direction.
+The **controller** probes, not the agent: it already asks every agent for
+engine calls, so probing costs a round trip it is already paying and needs no
+new transport in the other direction. An earlier version did this over gRPC;
+the transport moved to NATS request/reply so there is one transport to run,
+secure, and reason about.
 
-The probe calls the agent's `Usage` RPC rather than adding a dedicated health
-method. `Usage` is a real round trip *through the compute engine*, so a host
-whose libvirt socket is unreachable is correctly NOTREADY even though its agent
-process is alive. A liveness check that only proved the process was up would
-place such a host into the scheduler's eligible set.
+The probe asks `usage` rather than a dedicated health method. Usage is a real
+round trip *through the compute engine*, so a host whose libvirt socket is
+unreachable is correctly NOTREADY even though its agent process is alive. A
+liveness check that only proved the process was up would place such a host
+into the scheduler's eligible set.
+
+A passing probe then asks `info` — what the agent runs, what its host holds —
+and records it on the node. Bootstrap carries none of this.
 
 A node is added to the list as soon as it registers and becomes usable only once
 it proves it can run a VM. Those are deliberately separate: one is a claim, the
@@ -260,18 +255,18 @@ and is correctly unplaceable.
 ### What the agent does, in order
 
 ```
-1. net.Listen(gRPC port)        ← binds before anything else
-2. POST /v1alpha1/nodes         ← bootstrap with the token
-3. grpcServer.Serve(...)        ← now reachable
+1. POST /v1alpha1/nodes         ← bootstrap with the token
+2. serve agent.<node-id>        ← answer engine calls on the bus
 ```
 
-The order is deliberate. `net.Listen` binds the port, so a controller dialling
-between step 1 and step 3 has its connection queued in the backlog rather than
-refused. Bootstrapping first would open a window where the controller has been
-told this agent exists but cannot reach it.
+There is no listen-before-bootstrap dance any more: nothing dials the agent,
+so there is no port to bind and no window where the controller knows about an
+agent it cannot reach. If the agent is not serving, the request times out and
+the node is NOTREADY — that is the whole failure model.
 
-The agent re-bootstraps on every start, which is how a changed port or changed
-capacity reaches the control plane without an operator editing anything.
+The agent re-bootstraps on every start. Capacity and engine are re-fetched by
+the probe anyway, so a changed host reaches the control plane without an
+operator editing anything.
 
 A refused token is **not** retried: waiting cannot make it valid, and an agent
 looping on a `401` looks alive while being permanently unable to join. An
@@ -280,14 +275,14 @@ unreachable api **is** retried, because that is a startup ordering problem.
 ### Token generation
 
 ```sh
-# Once, on the api host.
-arsan apitoken > /etc/arsan/bootstrap.token && chmod 0600 /etc/arsan/bootstrap.token
+# Once, on the api host: any random string. There is no generator command;
+# openssl is fine.
+TOKEN=$(openssl rand -hex 32)
 
-arsan api --bootstrap.token-file /etc/arsan/bootstrap.token
+arsan api --bootstrap.token="$TOKEN"
 
-# Copy to each agent host; read there, then delete.
-scp /etc/arsan/bootstrap.token compute-1:/root/
-arsan agent --node.id=n1 --bootstrap.token-file /root/bootstrap.token
+# Same value on each agent host.
+arsan agent -t "$TOKEN" --driver=kvm
 ```
 
 ---
@@ -542,8 +537,8 @@ database and a bus.
 | From → To | Channel | Carries |
 |---|---|---|
 | `api` → `controller` | NATS JetStream | commands |
-| `agent` → `api` | HTTP, once | bootstrap token, identity, gRPC address |
-| `controller` → `agent` | gRPC | engine calls and the health check that makes a node READY |
+| `agent` → `api` | HTTP, once | bootstrap token, identity |
+| `controller` → `agent` | NATS request/reply | engine calls, usage, and the `info` that makes a node READY |
 | all → database | SQL | records |
 
 No other channel, and no direct library calls in either direction.
@@ -627,7 +622,7 @@ Decisions that the current shape does not settle, recorded so they are not
 rediscovered:
 
 - **Liveness: connection state or a heartbeat message?** *Settled: connection
-  state.* The controller probes the agent over gRPC and readiness follows the
+  state.* The controller probes the agent over NATS and readiness follows the
   answer. A heartbeat message was tried and removed: no agent sent one, so the
   timestamp aged every node out of service about 30s after it registered.
   Nothing in this design believes a timestamp.

@@ -275,3 +275,36 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+// Request gets one answer from whoever serves the subject, or a timeout when
+// nobody does. Silence is the failure signal the probe reads as NOTREADY.
+func TestRequestAnswers(t *testing.T) {
+	b := connect(t)
+	ctx := t.Context()
+
+	stop, err := b.Answer(ctx, "test.echo", func(_ context.Context, raw []byte) []byte {
+		return append([]byte("echo:"), raw...)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stop()
+
+	reply, err := b.Request(ctx, "test.echo", []byte("hi"))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if string(reply) != "echo:hi" {
+		t.Fatalf("reply = %q", reply)
+	}
+}
+
+func TestRequestTimesOutWhenNobodyAnswers(t *testing.T) {
+	b := connect(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	if _, err := b.Request(ctx, "test.nobody-home", []byte("hi")); err == nil {
+		t.Fatal("expected a timeout for an unserved subject")
+	}
+}

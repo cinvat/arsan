@@ -329,7 +329,7 @@ The tutorial series is complete. You now have a working OpenStack Nova-like cont
 - ✅ Scheduler: filter → weigh → claim (Step 4)
 - ✅ Compute state machine (Step 5)
 - ✅ Node registration & liveness (Step 6)
-- ✅ Agent gRPC server (Step 7)
+- ✅ Agent worker (Step 7)
 - ✅ Controller REST API (Step 8)
 - ✅ Remote driver for multi-node (Step 9)
 - ✅ Integration tests (Step 10)

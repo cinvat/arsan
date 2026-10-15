@@ -144,7 +144,6 @@ func (s *Store) Register(ctx context.Context, n core.Node) (core.Node, error) {
 	defer s.mu.Unlock()
 	if existing, ok := s.nodes[n.ID]; ok {
 		existing.Name = n.Name
-		existing.Address = n.Address
 		s.nodes[n.ID] = existing
 		return existing, nil
 	}
@@ -193,6 +192,32 @@ func (s *Store) SetNodeEnabled(ctx context.Context, id string, enabled bool) (co
 		return core.Node{}, fmt.Errorf("set enabled %s: %w", id, core.ErrNodeNotFound)
 	}
 	n.Enabled = enabled
+	s.nodes[id] = n
+	return n, nil
+}
+
+// SetNodeSpec records the engine and capacity the probe reported.
+func (s *Store) SetNodeSpec(ctx context.Context, id string, engine string, total core.Resources) (core.Node, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Node{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.nodes[id]
+	if !ok {
+		return core.Node{}, fmt.Errorf("set spec %s: %w", id, core.ErrNodeNotFound)
+	}
+	n.Driver = engine
+	// Available is Total minus what reservations hold. The held amount
+	// survives a capacity change: a host that grew makes room, one that
+	// shrank keeps its claims (Available floors at zero, never negative).
+	held := n.Total.Sub(n.Available)
+	n.Total = total
+	n.Available = core.Resources{
+		VCPU: max(total.VCPU-held.VCPU, 0),
+		RAM:  max(total.RAM-held.RAM, 0),
+		Disk: max(total.Disk-held.Disk, 0),
+	}
 	s.nodes[id] = n
 	return n, nil
 }

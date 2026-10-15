@@ -8,12 +8,12 @@ One binary, three subcommands: `api`, `controller`, `agent`.
 
 ```
 POST /v1alpha1/servers → api writes PENDING → NATS → 200 ("queued")
-controller consumes → schedule (filter → weigh → claim) → gRPC → agent's engine → libvirt
+controller consumes → schedule (filter → weigh → claim) → NATS request → agent's engine → libvirt
 ```
 
 - **api** — REST only (`/v1alpha1`). CRUD + publish commands. No scheduler, no engine.
 - **controller** — consumes NATS commands, probes agents, places VMs. No HTTP, no engine of its own.
-- **agent** — runs on each compute node. Owns the real engine (`fake`, `kvm`). Bootstraps over REST, answers gRPC.
+- **agent** — runs on each compute node. Owns the real engine (`fake`, `kvm`). Bootstraps over REST with only a token, answers on the bus.
 
 Terms follow Kubernetes: a **Node** is the machine (identity defaults to hostname), an **Agent** is the process on it, an **Engine** is what creates VMs.
 
@@ -26,15 +26,13 @@ go build -o arsan .
 /opt/homebrew/bin/nats-server -js &
 
 # API (holds the bootstrap token)
-echo "s3cret" > /tmp/token && chmod 600 /tmp/token
-./arsan api --addr=:8080 --bootstrap.token-file=/tmp/token
+./arsan api --addr=:8080 --bootstrap.token=s3cret
 
 # Controller
 ./arsan controller
 
 # Agent (declares its own engine)
-./arsan agent --node.advertise=127.0.0.1:9090 --driver=fake \
-  --agent.addr=:9090 --bootstrap-token-file=/tmp/token
+./arsan agent --driver=fake -t s3cret
 
 # Create a VM
 curl -X POST localhost:8080/v1alpha1/servers \

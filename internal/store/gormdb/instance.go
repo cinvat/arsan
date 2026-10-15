@@ -161,10 +161,10 @@ func (s *Store) Register(ctx context.Context, n core.Node) (core.Node, error) {
 	err := s.withTimeout(ctx).First(&existing, "id = ?", n.ID).Error
 	switch {
 	case err == nil:
-		// Re-registration is a heartbeat of sorts: keep state and
-		// reservations, refresh the descriptive fields.
+		// Re-registration keeps state, spec and reservations; only the name
+		// is refreshed. An agent restarting must not reset a host mid-build.
 		updates := map[string]any{
-			"name": n.Name, "address": n.Address, "updated_at": time.Now().UTC(),
+			"name": n.Name, "updated_at": time.Now().UTC(),
 		}
 		if err := s.withTimeout(ctx).Model(&nodeRow{}).
 			Where("id = ?", n.ID).Updates(updates).Error; err != nil {
@@ -228,6 +228,35 @@ func (s *Store) SetNodeEnabled(ctx context.Context, id string, enabled bool) (co
 	}
 	if res.RowsAffected == 0 {
 		return core.Node{}, fmt.Errorf("set enabled %s: %w", id, core.ErrNodeNotFound)
+	}
+	return s.GetNode(ctx, id)
+}
+
+// SetNodeSpec records the engine and capacity the probe reported. Available
+// keeps what reservations hold: Total moves, held stays, floored at zero.
+func (s *Store) SetNodeSpec(ctx context.Context, id string, engine string, total core.Resources) (core.Node, error) {
+	var row nodeRow
+	if err := s.withTimeout(ctx).First(&row, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return core.Node{}, fmt.Errorf("set spec %s: %w", id, core.ErrNodeNotFound)
+		}
+		return core.Node{}, fmt.Errorf("set spec %s: %w", id, err)
+	}
+	heldVCPU := row.TotalVCPU - row.AvailableVCPU
+	heldRAM := row.TotalRAM - row.AvailableRAM
+	heldDisk := row.TotalDisk - row.AvailableDisk
+	updates := map[string]any{
+		"driver":         engine,
+		"total_vcpu":     total.VCPU,
+		"total_ram":      total.RAM,
+		"total_disk":     total.Disk,
+		"available_vcpu": max(total.VCPU-heldVCPU, 0),
+		"available_ram":  max(total.RAM-heldRAM, 0),
+		"available_disk": max(total.Disk-heldDisk, 0),
+		"updated_at":     time.Now().UTC(),
+	}
+	if err := s.withTimeout(ctx).Model(&nodeRow{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		return core.Node{}, fmt.Errorf("set spec %s: %w", id, err)
 	}
 	return s.GetNode(ctx, id)
 }

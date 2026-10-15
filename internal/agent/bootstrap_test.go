@@ -24,16 +24,12 @@ func TestRegisterPostsEverythingTheControllerNeeds(t *testing.T) {
 		}
 		decodeBody(t, r, &got)
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"ID":"n-compute-1","Name":"compute-1","State":"NOTREADY","Address":"10.0.0.11:9090"}`))
+		_, _ = w.Write([]byte(`{"ID":"n-compute-1","Name":"compute-1","State":"NOTREADY"}`))
 	}))
 	defer srv.Close()
 
 	node, err := Register(t.Context(), srv.URL, "v1alpha1", "s3cret", BootstrapRequest{
-		Name:    "compute-1",
-		Arch:    "amd64",
-		Driver:  "kvm",
-		Address: "10.0.0.11:9090",
-		Total:   core.Resources{VCPU: 8, RAM: 16, Disk: 200},
+		Name: "compute-1",
 	})
 	if err != nil {
 		t.Fatalf("Register: %v", err)
@@ -45,12 +41,10 @@ func TestRegisterPostsEverythingTheControllerNeeds(t *testing.T) {
 	if got.Token != "s3cret" {
 		t.Errorf("token = %q, want the configured one", got.Token)
 	}
-	// The address is the whole point: it is how the controller dials back.
-	if got.Address != "10.0.0.11:9090" {
-		t.Errorf("address = %q, want the agent's endpoint", got.Address)
-	}
-	if got.Total.VCPU != 8 || got.Total.RAM != 16 || got.Total.Disk != 200 {
-		t.Errorf("total = %+v, want the declared capacity", got.Total)
+	// Identity is the whole request: capacity and engine arrive later, when
+	// the controller asks after the probe succeeds.
+	if got.Name != "compute-1" {
+		t.Errorf("name = %q, want compute-1", got.Name)
 	}
 }
 

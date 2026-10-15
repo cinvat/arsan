@@ -231,6 +231,61 @@ func handle(msg jetstream.Msg, h Handler) {
 	_ = msg.Ack()
 }
 
+// Request sends payload to subject and waits for one reply, bounded by ctx.
+//
+// Core NATS request/reply carries its own reply inbox, so there is nothing to
+// correlate by hand: one call, one answer, or a timeout.
+func (n *NATS) Request(ctx context.Context, subject string, payload []byte) ([]byte, error) {
+	n.mu.Lock()
+	closed := n.closed
+	n.mu.Unlock()
+	if closed {
+		return nil, ErrClosed
+	}
+	msg, err := n.conn.RequestWithContext(ctx, subject, payload)
+	if err != nil {
+		return nil, fmt.Errorf("bus: request %s: %w", subject, err)
+	}
+	return msg.Data, nil
+}
+
+// Answer serves one subject with plain request/reply: each message gets one
+// response from h. Ephemeral core NATS, not JetStream — there is nothing to
+// persist or redeliver, because the asker times out and treats silence as
+// failure.
+func (n *NATS) Answer(ctx context.Context, subject string, h func(context.Context, []byte) []byte) (func(), error) {
+	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
+		return nil, ErrClosed
+	}
+	n.mu.Unlock()
+
+	sub, err := n.conn.Subscribe(subject, func(msg *nats.Msg) {
+		callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := msg.Respond(h(callCtx, msg.Data)); err != nil {
+			return
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bus: answer %s: %w", subject, err)
+	}
+
+	stop := func() {
+		_ = sub.Unsubscribe()
+	}
+	n.mu.Lock()
+	n.stopped = append(n.stopped, stop)
+	n.mu.Unlock()
+
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	return stop, nil
+}
+
 // Close drains subscriptions and closes the connection.
 func (n *NATS) Close() error {
 	n.mu.Lock()

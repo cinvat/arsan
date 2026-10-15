@@ -52,22 +52,20 @@ type Controller struct {
 func NewController(cfg Config, commands bus.Bus, log Logger) (*Controller, error) {
 	store := memory.New()
 
-	driverFor := drivers(store)
-
 	c := &Controller{
 		Store:    store,
 		Commands: commands,
 		Scheduler: scheduler.New(scheduler.Config{
 			Instances:   store,
 			Nodes:       store,
-			DriverFor:   driverFor,
+			DriverFor:   drivers(commands),
 			MaxAttempts: cfg.SchedulerMaxAttempts,
 			Log:         log,
 		}),
 		Compute: compute.New(compute.Config{
 			Instances:              store,
 			Nodes:                  store,
-			DriverFor:              driverFor,
+			DriverFor:              drivers(commands),
 			DriverOperationTimeout: cfg.ComputeDriverOpTimeout,
 			SweepInterval:          cfg.ComputeSweepInterval,
 			Log:                    log,
@@ -92,54 +90,39 @@ func NewController(cfg Config, commands bus.Bus, log Logger) (*Controller, error
 //
 // A node's address is read from the node record rather than from an in-process
 // cache: the cache is filled only by whichever controller consumed
-// node.registered, so with a shared durable consumer the other controller never
-// fills it in, and it is empty after any restart. Reading the store makes the
-// controller correct without depending on having seen the command at all.
-func drivers(store *memory.Store) func(string) (core.Driver, error) {
+// drivers resolves a node's driver. The node id IS the address
+// (agent.<node-id>), so there is nothing to look up, cache, or rediscover:
+// a controller that has never seen this node commands it as well as one that
+// just consumed its registration.
+func drivers(commands bus.Bus) func(string) (core.Driver, error) {
 	return func(nodeID string) (core.Driver, error) {
-		node, err := store.GetNode(context.Background(), nodeID)
-		if err != nil {
-			return nil, fmt.Errorf("node %s: %w", nodeID, err)
-		}
-		if node.Address == "" {
-			return nil, fmt.Errorf("node %s has no agent address", nodeID)
-		}
-		return remote.New(nodeID, node.Address)
+		return remote.New(nodeID, commands), nil
 	}
 }
 
-// CheckAgent verifies the controller can reach a node's agent at all, before
-// probing what it can do.
+// CheckAgent verifies the node record exists before probing it.
 //
 // It deliberately does NOT change readiness. The bus command only tells the
 // controller an agent exists; whether it can actually run a VM is settled by
 // ProbeAgent, and conflating the two would make a host READY on the strength of
 // a registration it has not yet answered.
-//
-// There is nothing to register here: the address is already on the node record,
-// and drivers() reads it from there. An earlier version cached it in a
-// process-global map keyed by node id, which was a second copy of a fact the
-// database already holds — and one only ever filled on whichever controller
-// consumed the command.
 func CheckAgent(store *memory.Store, nodeID string) error {
-	node, err := store.GetNode(context.Background(), nodeID)
-	if err != nil {
-		return err
-	}
-	if node.Address == "" {
-		return fmt.Errorf("node %s has no agent address", nodeID)
-	}
-	return nil
+	_, err := store.GetNode(context.Background(), nodeID)
+	return err
 }
 
 // ProbeAgent asks an agent whether it can actually host a VM, and records the
 // answer.
 //
-// The probe calls the agent's Usage RPC rather than adding a dedicated health
-// method, because Usage is a real round trip through the compute engine: a host
-// whose libvirt socket is unreachable is NOTREADY for VMs, even though its
-// agent process is perfectly alive. A liveness check that only proved the
-// process was up would put such a host into the scheduler's eligible set.
+// The probe calls usage rather than a dedicated health method, because usage
+// is a real round trip through the compute engine: a host whose libvirt socket
+// is unreachable is NOTREADY for VMs, even though its agent process is
+// perfectly alive. A liveness check that only proved the process was up would
+// put such a host into the scheduler's eligible set.
+//
+// A passing probe also fetches what the agent runs and what its host holds,
+// and records it on the node. That is how the controller learns capacity: the
+// agent never describes itself at bootstrap.
 //
 // It returns nil whether the answer was yes or no; the outcome is recorded on
 // the node. A caller that wants to know should read the node back.
@@ -161,6 +144,18 @@ func (c *Controller) ProbeAgent(ctx context.Context, nodeID string) error {
 	// it here keeps node.Usage honest without a second, redundant call.
 	if _, err := c.Store.RecordUsage(ctx, nodeID, usage, time.Now().UTC()); err != nil {
 		c.log.Warn("record usage", "node", nodeID, "err", err)
+	}
+	// Capacity and engine arrive here, not at bootstrap: the agent should not
+	// have to know its host to join, and whatever it knew would be stale the
+	// moment the host changed.
+	if rd, ok := d.(*remote.Driver); ok {
+		if engine, total, err := rd.Info(probeCtx); err == nil {
+			if _, err := c.Store.SetNodeSpec(ctx, nodeID, engine, total); err != nil {
+				c.log.Warn("record spec", "node", nodeID, "err", err)
+			}
+		} else {
+			c.log.Warn("fetch spec", "node", nodeID, "err", err)
+		}
 	}
 	return c.setReadiness(ctx, nodeID, nil)
 }
@@ -200,11 +195,10 @@ func (c *Controller) setReadiness(ctx context.Context, nodeID string, cause erro
 	return nil
 }
 
-// driverForNode resolves a node's driver by dialing its agent. It is the same
-// lookup the scheduler and compute service use; the probe just calls it
-// directly.
+// driverForNode resolves a node's driver. It is the same lookup the
+// scheduler and compute service use; the probe just calls it directly.
 func (c *Controller) driverForNode(nodeID string) (core.Driver, error) {
-	return drivers(c.Store)(nodeID)
+	return drivers(c.Commands)(nodeID)
 }
 
 const probeTimeout = 10 * time.Second

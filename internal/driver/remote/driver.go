@@ -2,148 +2,114 @@ package remote
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/cinvat/arsan/internal/agent"
+	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/core"
 )
 
 const defaultTimeout = 30 * time.Second
 
+// Driver implements core.Driver by asking the agent over NATS. It holds no
+// connection of its own: the node id is the address (agent.<node-id>), so
+// there is nothing to dial, cache, or rediscover when an agent moves.
 type Driver struct {
-	client agent.ComputeNodeAgentClient
-	nodeID string
-	name   string
+	commands bus.Bus
+	nodeID   string
+	name     string
 }
 
-func New(nodeID, addr string) (*Driver, error) {
-	client, err := agent.NewClient(addr)
-	if err != nil {
-		return nil, fmt.Errorf("dial agent %s: %w", addr, err)
-	}
-	return &Driver{client: client, nodeID: nodeID, name: "remote"}, nil
+func New(nodeID string, commands bus.Bus) *Driver {
+	return &Driver{commands: commands, nodeID: nodeID, name: "remote"}
 }
 
 func (d *Driver) Name() string { return d.name }
 
-// roundTrip bounds the call and translates the agent's success envelope into
-// an error. Every engine operation is the same shape — a bounded call whose
-// failure arrives either as a transport error or as success=false — so they
-// share this instead of repeating it eight times.
-func (d *Driver) roundTrip(ctx context.Context, op string, fn func(context.Context) (bool, string, error)) error {
+// call sends one engine op and decodes the answer. A timeout means the agent
+// did not answer, which the caller records as NOTREADY or a failed operation.
+func (d *Driver) call(ctx context.Context, req agent.Request) (agent.Response, error) {
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
-	ok, msg, err := fn(ctx)
+
+	raw, err := json.Marshal(req)
 	if err != nil {
-		return err
+		return agent.Response{}, err
 	}
-	if !ok {
-		return fmt.Errorf("%s: %s", op, msg)
+	data, err := d.commands.Request(ctx, agent.Subject(d.nodeID), raw)
+	if err != nil {
+		return agent.Response{}, err
 	}
-	return nil
+	var resp agent.Response
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return agent.Response{}, fmt.Errorf("remote: bad reply: %w", err)
+	}
+	if !resp.OK {
+		return agent.Response{}, fmt.Errorf("%s: %s", req.Op, resp.Error)
+	}
+	return resp, nil
 }
 
 func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
-	return d.roundTrip(ctx, "validate", func(ctx context.Context) (bool, string, error) {
-		resp, err := d.client.Validate(ctx, &agent.ValidateRequest{Flavor: agent.FromCoreFlavor(f)})
-		if err != nil {
-			return false, "", err
-		}
-		return resp.CanRun, resp.Message, nil
-	})
+	_, err := d.call(ctx, agent.Request{Op: agent.OpValidate, Flavor: f})
+	return err
 }
 
 func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.InstanceInfo, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	resp, err := d.client.Create(ctx, &agent.CreateRequest{
-		InstanceID: req.InstanceID,
-		NodeID:     req.NodeID,
-		Name:       req.Name,
-		Flavor:     agent.FromCoreFlavor(req.Flavor),
-		ImageRef:   req.ImageRef,
+	resp, err := d.call(ctx, agent.Request{
+		Op: agent.OpCreate, InstanceID: req.InstanceID, NodeID: req.NodeID,
+		Name: req.Name, Flavor: req.Flavor, ImageRef: req.ImageRef,
 	})
 	if err != nil {
 		return core.InstanceInfo{}, err
 	}
-	if !resp.Success {
-		return core.InstanceInfo{}, fmt.Errorf("create: %s", resp.Message)
-	}
-	return core.InstanceInfo{
-		ID:      resp.Info.ID,
-		NodeID:  resp.Info.NodeID,
-		Driver:  resp.Info.Driver,
-		Started: resp.Info.Started,
-	}, nil
+	return resp.Info, nil
 }
 
 func (d *Driver) Start(ctx context.Context, id string) error {
-	return d.roundTrip(ctx, "start", func(ctx context.Context) (bool, string, error) {
-		resp, err := d.client.Start(ctx, &agent.StartRequest{InstanceID: id})
-		if err != nil {
-			return false, "", err
-		}
-		return resp.Success, resp.Message, nil
-	})
+	_, err := d.call(ctx, agent.Request{Op: agent.OpStart, InstanceID: id})
+	return err
 }
 
 func (d *Driver) Stop(ctx context.Context, id string) error {
-	return d.roundTrip(ctx, "stop", func(ctx context.Context) (bool, string, error) {
-		resp, err := d.client.Stop(ctx, &agent.StopRequest{InstanceID: id})
-		if err != nil {
-			return false, "", err
-		}
-		return resp.Success, resp.Message, nil
-	})
+	_, err := d.call(ctx, agent.Request{Op: agent.OpStop, InstanceID: id})
+	return err
 }
 
 func (d *Driver) Delete(ctx context.Context, id string) error {
-	return d.roundTrip(ctx, "delete", func(ctx context.Context) (bool, string, error) {
-		resp, err := d.client.Delete(ctx, &agent.DeleteRequest{InstanceID: id})
-		if err != nil {
-			return false, "", err
-		}
-		return resp.Success, resp.Message, nil
-	})
+	_, err := d.call(ctx, agent.Request{Op: agent.OpDelete, InstanceID: id})
+	return err
 }
 
 func (d *Driver) Reboot(ctx context.Context, id string) error {
-	return d.roundTrip(ctx, "reboot", func(ctx context.Context) (bool, string, error) {
-		resp, err := d.client.Reboot(ctx, &agent.RebootRequest{InstanceID: id})
-		if err != nil {
-			return false, "", err
-		}
-		return resp.Success, resp.Message, nil
-	})
+	_, err := d.call(ctx, agent.Request{Op: agent.OpReboot, InstanceID: id})
+	return err
 }
 
 func (d *Driver) Migrate(ctx context.Context, id, targetNodeID string) error {
-	return d.roundTrip(ctx, "migrate", func(ctx context.Context) (bool, string, error) {
-		resp, err := d.client.Migrate(ctx, &agent.MigrateRequest{
-			InstanceID:   id,
-			TargetNodeID: targetNodeID,
-		})
-		if err != nil {
-			return false, "", err
-		}
-		return resp.Success, resp.Message, nil
+	_, err := d.call(ctx, agent.Request{
+		Op: agent.OpMigrate, InstanceID: id, TargetNodeID: targetNodeID,
 	})
+	return err
 }
 
 func (d *Driver) Usage(ctx context.Context) (core.Resources, error) {
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	resp, err := d.client.Usage(ctx, &agent.UsageRequest{})
+	resp, err := d.call(ctx, agent.Request{Op: agent.OpUsage})
 	if err != nil {
 		return core.Resources{}, err
 	}
-	if !resp.Success {
-		return core.Resources{}, fmt.Errorf("usage: %s", resp.Message)
-	}
-	return agent.ToCoreResources(resp.Usage), nil
+	return resp.Usage, nil
 }
 
-func (d *Driver) Close() error {
-	return d.client.Close()
+// Info asks the agent what it runs and what its host holds. The controller
+// calls this after the probe succeeds and records the answer on the node, so
+// the agent never has to describe itself at bootstrap.
+func (d *Driver) Info(ctx context.Context) (engine string, total core.Resources, err error) {
+	resp, err := d.call(ctx, agent.Request{Op: agent.OpInfo})
+	if err != nil {
+		return "", core.Resources{}, err
+	}
+	return resp.Engine, resp.Total, nil
 }

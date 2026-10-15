@@ -126,7 +126,6 @@ type nodeRow struct {
 	State          string `gorm:"size:32;index"`
 	Enabled        bool
 	Driver         string `gorm:"size:32"`
-	Address        string `gorm:"size:255"`
 	TotalVCPU      int    `gorm:"column:total_vcpu"`
 	TotalRAM       int    `gorm:"column:total_ram"`
 	TotalDisk      int    `gorm:"column:total_disk"`
@@ -199,7 +198,6 @@ func toNode(r nodeRow) core.Node {
 		State:          core.NodeState(r.State),
 		Enabled:        r.Enabled,
 		Driver:         r.Driver,
-		Address:        r.Address,
 		Total:          core.Resources{VCPU: r.TotalVCPU, RAM: r.TotalRAM, Disk: r.TotalDisk},
 		Available:      core.Resources{VCPU: r.AvailableVCPU, RAM: r.AvailableRAM, Disk: r.AvailableDisk},
 		Usage:          core.Resources{VCPU: r.UsageVCPU, RAM: r.UsageRAM, Disk: r.UsageDisk},
@@ -217,7 +215,6 @@ func fromNode(n core.Node) nodeRow {
 		State:          string(n.State),
 		Enabled:        n.Enabled,
 		Driver:         n.Driver,
-		Address:        n.Address,
 		TotalVCPU:      n.Total.VCPU,
 		TotalRAM:       n.Total.RAM,
 		TotalDisk:      n.Total.Disk,

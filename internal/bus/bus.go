@@ -89,6 +89,14 @@ type Bus interface {
 	// topic sets are disjoint, but a test observing the bus certainly does.
 	SubscribeAs(ctx context.Context, topic, subscriber string, h Handler) (cancel func(), err error)
 
+	// Request sends payload to subject and waits for one reply, bounded by ctx.
+	//
+	// This is core NATS, not JetStream: no persistence, no redelivery. It is
+	// for questions, not commands — asking an agent what it can do, not
+	// telling the controller what to do. If nobody answers in time the caller
+	// gets an error, which for the probe simply means NOTREADY.
+	Request(ctx context.Context, subject string, payload []byte) ([]byte, error)
+
 	// Close releases the connection and waits for in-flight work.
 	Close() error
 }

@@ -94,13 +94,14 @@ const (
 func (n NodeState) Ready() bool { return n == NodeReady }
 
 type Node struct {
-	ID            string
-	Name          string
-	Arch          string
-	State         NodeState
-	Enabled       bool
+	ID      string
+	Name    string
+	Arch    string
+	State   NodeState
+	Enabled bool
+	// Driver and Total are filled by the controller's probe, never by
+	// bootstrap: the agent joins knowing nothing but the token.
 	Driver        string
-	Address       string
 	Total         Resources
 	Available     Resources
 	Usage         Resources

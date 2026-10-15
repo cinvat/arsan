@@ -17,16 +17,12 @@ import (
 
 // BootstrapRequest is what an agent posts to register itself.
 //
-// Address is the agent's OWN gRPC endpoint, sent on every bootstrap so the
-// controller knows where to dial without a second discovery step. That is what
-// lets an agent restart on a different port and be found correctly.
+// A bootstrap carries identity and nothing else. Capacity, engine and usage
+// are fetched by the controller after the probe succeeds, so the agent never
+// has to describe a host it may not even know yet.
 type BootstrapRequest struct {
-	Token   string         `json:"token"`
-	Name    string         `json:"name"`
-	Arch    string         `json:"arch"`
-	Driver  string         `json:"driver"`
-	Address string         `json:"address"`
-	Total   core.Resources `json:"total"`
+	Token string `json:"token"`
+	Name  string `json:"name"`
 }
 
 // BootstrapError describes a rejected registration.

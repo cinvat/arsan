@@ -83,19 +83,15 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 	},
 }
 
-// bootstrapToken reads the shared bootstrap secret.
-//
-// It is never a plain flag value: a flag is world-readable through ps, and this
-// secret authorises a host to join the cluster.
+// bootstrapToken is the shared secret an agent presents to register.
 func bootstrapToken() string {
-	return secretFile("bootstrap.token", "bootstrap.token-file", "bootstrap.token")
+	return viper.GetString("bootstrap.token")
 }
 
 func init() {
 	apiCmd.Flags().String("addr", ":8080", "HTTP listen address")
 	apiCmd.Flags().String("bus.url", "nats://127.0.0.1:4222", "NATS URL for the command bus")
-	apiCmd.Flags().String("bootstrap.token-file", "", "file holding the shared bootstrap token (0600)")
-	_ = apiCmd.Flags().MarkHidden("bootstrap.token-file")
+	apiCmd.Flags().String("bootstrap.token", "", "shared bootstrap token agents present to register")
 
 	rootCmd.AddCommand(apiCmd)
 }

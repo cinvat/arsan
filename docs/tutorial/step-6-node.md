@@ -2,7 +2,7 @@
 
 ## Goal
 Implement node registration, usage reporting, and enable/disable. **Readiness is
-not decided here** — the controller probes the agent over gRPC and sets it.
+not decided here** — the controller probes the agent over NATS and sets it.
 
 ## Terminology
 
@@ -60,7 +60,7 @@ func NodeID(name string) string { return "n-" + util.Slug(name) }
 
 // RecordUsage stores what the agent reports it is using. It deliberately does
 // NOT set readiness: the controller decides that by probing the agent over
-// gRPC, and nothing on this path may promote a node the probe has not cleared.
+// NATS, and nothing on this path may promote a node the probe has not cleared.
 func (s *Service) RecordUsage(ctx context.Context, nodeID string, usage core.Resources) error {
 	node, err := s.cfg.Nodes.RecordUsage(ctx, nodeID, usage, time.Now().UTC())
 	if err != nil { return err }
@@ -102,7 +102,7 @@ func (s *Service) Disable(ctx context.Context, id string) error {
 // There is deliberately no timestamp-based liveness loop here. A missed
 // missing heartbeat says the agent stopped calling, which is not the same as
 // "this node cannot run a VM" — and no agent calls at all, since it bootstraps
-// once and afterwards only answers gRPC. The controller's probe answers the
+// once and afterwards only answers on the bus. The controller's probe answers the
 // question that actually matters, and it answers it through the compute engine.
 
 func (s *Service) Drained(ctx context.Context, id string) ([]string, error) {
@@ -129,7 +129,7 @@ func slug(name string) string {
 ### Registration vs Readiness
 ```go
 // Register: node comes up as NOTREADY
-// Probe (controller -> agent, gRPC): transitions to READY
+// Probe (controller -> agent, over NATS): transitions to READY
 ```
 A node that cannot be reached should never be schedulable.
 
@@ -145,7 +145,7 @@ cannot run.
 
 **There is no heartbeat loop, and no timestamp check.** An earlier version aged
 nodes out on `LastHeartbeat`, but no agent ever sends a heartbeat — it
-bootstraps once and afterwards only answers gRPC — so every node silently aged
+bootstraps once and afterwards only answers on the bus — so every node silently aged
 out of service about 30 seconds after registering. Readiness is the probe and
 nothing else.
 
@@ -153,7 +153,7 @@ nothing else.
 ```go
 func (c *Controller) ProbeAll(ctx context.Context) error {
     for _, n := range nodes {
-        c.ProbeAgent(ctx, n.ID)   // Usage over gRPC
+        c.ProbeAgent(ctx, n.ID)   // usage over NATS
     }
 }
 ```
@@ -275,4 +275,4 @@ go test -race ./internal/records/... ./internal/store/...
 
 ## Next
 
-Step 7: Agent gRPC Server
+Step 7: Agent Worker

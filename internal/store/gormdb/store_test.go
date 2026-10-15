@@ -269,7 +269,7 @@ func TestRegisterIsAnUpsert(t *testing.T) {
 
 	// Re-register: capacity and state must survive.
 	_, err := s.Register(t.Context(), core.Node{
-		ID: "n-1", Name: "n-1-renamed", Address: "10.0.0.9:9090",
+		ID: "n-1", Name: "n-1-renamed",
 		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 200},
 	})
 	if err != nil {
@@ -279,9 +279,6 @@ func TestRegisterIsAnUpsert(t *testing.T) {
 	n, _ := s.GetNode(t.Context(), "n-1")
 	if n.Name != "n-1-renamed" {
 		t.Errorf("name = %q, want it refreshed", n.Name)
-	}
-	if n.Address != "10.0.0.9:9090" {
-		t.Errorf("address = %q, want it refreshed", n.Address)
 	}
 	if n.Available != (core.Resources{VCPU: 6, RAM: 12, Disk: 180}) {
 		t.Errorf("available = %+v, want the reservation preserved across a re-register", n.Available)
@@ -446,7 +443,7 @@ func TestRecordUsageDoesNotSetReadiness(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := s.Register(ctx, core.Node{
-		ID: "n1", Name: "compute-1", Enabled: true, Address: "10.0.0.1:9090",
+		ID: "n1", Name: "compute-1", Enabled: true,
 		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 100},
 	}); err != nil {
 		t.Fatal(err)
@@ -485,7 +482,7 @@ func TestMemoryRecordUsageDoesNotSetReadiness(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := s.Register(ctx, core.Node{
-		ID: "n1", Name: "compute-1", Enabled: true, Address: "10.0.0.1:9090",
+		ID: "n1", Name: "compute-1", Enabled: true,
 		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 100},
 	}); err != nil {
 		t.Fatal(err)

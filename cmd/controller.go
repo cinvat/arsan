@@ -101,7 +101,8 @@ func onNodeRegistered(c *app.Controller, log app.Logger) func(context.Context, b
 		if err != nil {
 			return nil // gone; nothing to announce
 		}
-		log.Info("node up", "node", node.ID, "address", node.Address, "driver", node.Driver)
+		log.Info("node probed", "node", node.ID, "state", node.State,
+			"reason", node.NotReadyReason)
 		return nil
 	}
 }

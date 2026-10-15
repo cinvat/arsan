@@ -21,7 +21,7 @@ func setup(t *testing.T) (*Service, *memory.Store) {
 	st := memory.New()
 	ctx := context.Background()
 	if _, err := st.Register(ctx, core.Node{
-		ID: "n-1", Name: "compute-1", Enabled: true, Address: "127.0.0.1:1",
+		ID: "n-1", Name: "compute-1", Enabled: true,
 		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 100},
 	}); err != nil {
 		t.Fatal(err)

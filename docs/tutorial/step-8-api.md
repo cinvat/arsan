@@ -116,7 +116,7 @@ func (s *Server) getNode(c *gin.Context) {
 }
 
 // usage records what an agent reports it is using. It does not affect
-// readiness: the controller decides that by probing over gRPC, and a usage
+// readiness: the controller decides that by probing over NATS, and a usage
 // report only proves the request arrived.
 func (s *Server) usage(c *gin.Context) {
 	id := c.Param("id")

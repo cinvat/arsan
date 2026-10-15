@@ -3,11 +3,14 @@ package app
 import (
 	"context"
 	"errors"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/cinvat/arsan/internal/agent"
+	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/core"
+	"github.com/cinvat/arsan/internal/driver/fake"
 )
 
 // quiet swallows log output so a failing test's cause is visible.
@@ -17,11 +20,39 @@ func (quiet) Info(string, ...any)  {}
 func (quiet) Warn(string, ...any)  {}
 func (quiet) Error(string, ...any) {}
 
-// newTestController builds a controller over a fresh store. The probe itself is
-// stubbed through the driverForNode seam where a test needs it.
-func newTestController(t *testing.T) *Controller {
+// loopback routes requests straight into a worker, or fails them when there
+// is none: an agent nobody answers for. The full protocol runs with no
+// transport at all.
+type loopback struct {
+	worker *agent.Worker
+}
+
+func (l *loopback) Publish(context.Context, bus.Command) error      { return nil }
+func (l *loopback) PublishAsync(context.Context, bus.Command) error { return nil }
+func (l *loopback) Subscribe(_ context.Context, _ string, _ bus.Handler) (func(), error) {
+	return func() {}, nil
+}
+func (l *loopback) SubscribeAs(_ context.Context, _, _ string, _ bus.Handler) (func(), error) {
+	return func() {}, nil
+}
+func (l *loopback) Request(ctx context.Context, subject string, payload []byte) ([]byte, error) {
+	if l.worker == nil {
+		return nil, fmt.Errorf("no agent at %s", subject)
+	}
+	return l.worker.Handle(ctx, payload), nil
+}
+func (l *loopback) Close() error { return nil }
+
+// newTestController builds a controller over a fresh store. answering decides
+// whether the agent picks up: true serves a fake engine, false leaves the
+// node unanswered so probes fail.
+func newTestController(t *testing.T, answering bool) *Controller {
 	t.Helper()
-	c, err := NewController(Config{}, nil, quiet{})
+	var commands bus.Bus = &loopback{}
+	if answering {
+		commands = &loopback{worker: agent.NewWorker("n-1", fake.New())}
+	}
+	c, err := NewController(Config{}, commands, quiet{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +64,6 @@ func registerTestNode(t *testing.T, c *Controller, id string, enabled bool) core
 	n, err := c.Store.Register(t.Context(), core.Node{
 		ID: id, Name: id, Enabled: enabled,
 		Total:     core.Resources{VCPU: 8, RAM: 16, Disk: 200},
-		Address:   "127.0.0.1:1", // nothing listens here, so probes fail
 		Instances: []string{},
 	})
 	if err != nil {
@@ -45,7 +75,7 @@ func registerTestNode(t *testing.T, c *Controller, id string, enabled bool) core
 // An unreachable agent must leave the node NOTREADY with a reason an operator
 // can act on. A bare NOTREADY with no explanation is not useful.
 func TestProbeUnreachableAgentRecordsReason(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, false)
 	registerTestNode(t, c, "n-1", true)
 
 	if err := c.ProbeAgent(t.Context(), "n-1"); err != nil {
@@ -66,7 +96,7 @@ func TestProbeUnreachableAgentRecordsReason(t *testing.T) {
 
 // The reason must not flap: an unchanged failure should not rewrite the record.
 func TestProbeIsIdempotentWhileUnreachable(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, false)
 	registerTestNode(t, c, "n-1", true)
 
 	if err := c.ProbeAgent(t.Context(), "n-1"); err != nil {
@@ -89,7 +119,7 @@ func TestProbeIsIdempotentWhileUnreachable(t *testing.T) {
 // An operator-disabled node is not a broken node. The probe must not overwrite
 // their reason with its own failure.
 func TestProbeLeavesDisabledNodeAlone(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, false)
 	registerTestNode(t, c, "n-1", false)
 
 	if _, err := c.Store.SetReadiness(t.Context(), "n-1", core.NodeNotReady, "drained by operator"); err != nil {
@@ -109,7 +139,7 @@ func TestProbeLeavesDisabledNodeAlone(t *testing.T) {
 }
 
 func TestProbeMissingNode(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, false)
 	err := c.ProbeAgent(t.Context(), "ghost")
 	if !errors.Is(err, core.ErrNodeNotFound) {
 		t.Fatalf("got %v, want ErrNodeNotFound", err)
@@ -118,7 +148,7 @@ func TestProbeMissingNode(t *testing.T) {
 
 // A sweep must not be stopped by one unreachable agent.
 func TestProbeAllContinuesPastFailures(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, false)
 	for _, id := range []string{"n-1", "n-2", "n-3"} {
 		registerTestNode(t, c, id, true)
 	}
@@ -142,7 +172,7 @@ func TestProbeAllContinuesPastFailures(t *testing.T) {
 }
 
 func TestProbeLoopStopsOnContext(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, true)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -153,7 +183,7 @@ func TestProbeLoopStopsOnContext(t *testing.T) {
 
 // Checking an agent records nothing and changes no state.
 func TestCheckAgentDoesNotSetReadiness(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, true)
 	registerTestNode(t, c, "n-1", true)
 
 	if err := CheckAgent(c.Store, "n-1"); err != nil {
@@ -166,25 +196,18 @@ func TestCheckAgentDoesNotSetReadiness(t *testing.T) {
 	}
 }
 
-func TestCheckAgentRejectsMissingAddress(t *testing.T) {
-	c := newTestController(t)
-	if _, err := c.Store.Register(t.Context(), core.Node{
-		ID: "n-1", Name: "n-1", Enabled: true,
-		Total: core.Resources{VCPU: 1, RAM: 1, Disk: 1},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	err := CheckAgent(c.Store, "n-1")
-	if err == nil || !strings.Contains(err.Error(), "no agent address") {
-		t.Fatalf("got %v, want a missing-address error", err)
+func TestCheckAgentRejectsMissingNode(t *testing.T) {
+	c := newTestController(t, true)
+	err := CheckAgent(c.Store, "ghost")
+	if !errors.Is(err, core.ErrNodeNotFound) {
+		t.Fatalf("got %v, want ErrNodeNotFound", err)
 	}
 }
 
 // The reason must be cleared when a node recovers, or a stale explanation
 // outlives the fault it described.
 func TestReadinessReasonIsClearedOnRecovery(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, true)
 	registerTestNode(t, c, "n-1", true)
 
 	if _, err := c.Store.SetReadiness(t.Context(), "n-1", core.NodeNotReady, "connection refused"); err != nil {
@@ -203,7 +226,7 @@ func TestReadinessReasonIsClearedOnRecovery(t *testing.T) {
 // A READY node that stops answering must come back out, or it keeps attracting
 // VMs it cannot run.
 func TestProbeTakesAReadyNodeBackOut(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, false)
 	registerTestNode(t, c, "n-1", true)
 
 	if _, err := c.Store.SetReadiness(t.Context(), "n-1", core.NodeReady, ""); err != nil {
@@ -219,38 +242,38 @@ func TestProbeTakesAReadyNodeBackOut(t *testing.T) {
 	}
 }
 
-// A controller that restarts after node.registered was acked has an empty
-// in-process driver registry but a node record that still holds the address.
-// It must still be able to drive that node.
-func TestDriverResolvesAfterRestartWithEmptyRegistry(t *testing.T) {
-	c := newTestController(t)
-	registerTestNode(t, c, "n-1", true)
-	// No RegisterAgent: simulate a restart where the command was already
-	// acked, so nothing repopulates the registry.
-
-	d, err := drivers(c.Store)("n-1")
+// Resolution needs no store state at all: the node id is the address, so a
+// controller that has never seen a node commands it as well as one that just
+// consumed its registration. There is no cache to go stale across restarts.
+func TestDriverResolvesWithoutNodeState(t *testing.T) {
+	c := newTestController(t, true)
+	d, err := drivers(c.Commands)("n-never-seen")
 	if err != nil {
-		t.Fatalf("driver must resolve from the node record, not the cache: %v", err)
+		t.Fatalf("driver must resolve from the id alone: %v", err)
 	}
 	if d == nil {
 		t.Fatal("nil driver")
 	}
 }
 
-// A node with no address must fail loudly rather than resolve to something.
-func TestDriverFailsWhenAddressUnknown(t *testing.T) {
-	c := newTestController(t)
-	// A distinct id, so this cannot pass by resolving some other test's node.
-	const id = "n-no-address"
-	if _, err := c.Store.Register(t.Context(), core.Node{
-		ID: id, Name: id, Enabled: true,
-		Total: core.Resources{VCPU: 1, RAM: 1, Disk: 1},
-	}); err != nil {
+// A passing probe records what the agent runs: the agent never describes
+// itself at bootstrap, so this is how the controller learns the spec.
+func TestProbeRecordsAgentSpec(t *testing.T) {
+	c := newTestController(t, true)
+	registerTestNode(t, c, "n-1", true)
+
+	if err := c.ProbeAgent(t.Context(), "n-1"); err != nil {
 		t.Fatal(err)
 	}
-
-	if _, err := drivers(c.Store)(id); err == nil {
-		t.Fatal("expected an error for a node with no agent address")
+	n, err := c.Store.GetNode(t.Context(), "n-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !n.State.Ready() {
+		t.Fatalf("state = %s (%s), want READY", n.State, n.NotReadyReason)
+	}
+	if n.Driver != "fake" {
+		t.Fatalf("driver = %q, want the engine the agent reported", n.Driver)
 	}
 }
 
@@ -261,7 +284,7 @@ func TestDriverFailsWhenAddressUnknown(t *testing.T) {
 // every node aged out of service 30s after registering and the cluster quietly
 // stopped placing anything. Readiness must depend on the probe and nothing else.
 func TestNodeStaysReadyAcrossProbeSweeps(t *testing.T) {
-	c := newTestController(t)
+	c := newTestController(t, true)
 	registerTestNode(t, c, "n-1", true)
 
 	// The agent is unreachable, so the probe will take it out; that is

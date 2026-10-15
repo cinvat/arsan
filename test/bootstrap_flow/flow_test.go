@@ -69,11 +69,7 @@ func TestAgentRegistersWithRealAPI(t *testing.T) {
 
 	// The agent side, exactly as cmd/agent.go calls it.
 	node, err := agent.Register(t.Context(), srv.URL, "v1alpha1", "shared-secret", agent.BootstrapRequest{
-		Name:    "compute-1",
-		Arch:    "amd64",
-		Driver:  "kvm",
-		Address: "10.0.0.11:9090",
-		Total:   core.Resources{VCPU: 8, RAM: 16, Disk: 200},
+		Name: "compute-1",
 	})
 	if err != nil {
 		t.Fatalf("agent bootstrap: %v", err)
@@ -84,10 +80,6 @@ func TestAgentRegistersWithRealAPI(t *testing.T) {
 	}
 	if node.State != core.NodeNotReady {
 		t.Errorf("state = %q, want NOTREADY until the node answers", node.State)
-	}
-	// The controller reaches the agent at exactly the address the agent sent.
-	if node.Address != "10.0.0.11:9090" {
-		t.Errorf("address = %q, want the agent's advertised endpoint", node.Address)
 	}
 
 	select {
@@ -118,9 +110,7 @@ func TestAgentWithWrongTokenCannotJoin(t *testing.T) {
 	srv := newTestServer(t, engine)
 
 	_, err = agent.Register(t.Context(), srv.URL, "v1alpha1", "a-guess", agent.BootstrapRequest{
-		Name:    "compute-9",
-		Address: "10.0.0.19:9090",
-		Total:   core.Resources{VCPU: 8, RAM: 16, Disk: 200},
+		Name: "compute-9",
 	})
 	if err == nil {
 		t.Fatal("an agent with the wrong token was allowed to join")

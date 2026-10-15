@@ -21,7 +21,7 @@ cmd/                     cobra subcommands (package cmd)
   root.go                root command, --config, viper wiring, shared helpers
   api.go                 `arsan api` — serves the versioned REST API
   controller.go          `arsan controller` — control plane loops, no HTTP
-  agent.go               `arsan agent` — gRPC compute node agent
+  agent.go               `arsan agent` — compute node agent (NATS worker)
 api/                     versioned REST surface
   api.go                 Register(Config) *gin.Engine; mounts each version
   v1alpha1/              one directory per API version
@@ -37,7 +37,7 @@ internal/compute         instance lifecycle state machine (build/stop/start/dele
 internal/store/memory    in-memory store (CAS transitions)
 internal/store/gormdb    durable store (GORM; postgres or sqlite)
 internal/driver          core.Driver registry + fake/kvm/remote
-internal/agent           gRPC agent server + client
+internal/agent           agent worker: NATS request/reply protocol + REST bootstrap client
 ```
 
 ## Key Principles
@@ -58,7 +58,7 @@ internal/agent           gRPC agent server + client
 | CLI | `spf13/cobra` | subcommands in `cmd/`; `main.go` is a shim |
 | Config | `spf13/viper` | precedence: flags > `ARSAN_*` env > config file > defaults |
 | HTTP | `github.com/gin-gonic/gin` | REST API, versioned under `/v1alpha1` |
-| gRPC | `google.golang.org/grpc` | api/controller ↔ agent; no message broker |
+| Bus | NATS JetStream + core request/reply | commands are durable; engine calls are request/reply |
 | Utils | `github.com/samber/lo` | slice/map helpers |
 | Database | `gorm.io/gorm` + `gorm.io/driver/postgres`, `gorm.io/driver/sqlite` | PostgreSQL in production, SQLite for tests |
 | Bus | `github.com/nats-io/nats.go` (JetStream) | api ↔ controller commands; no Kafka/RabbitMQ |
@@ -91,14 +91,13 @@ This is a one-line check and it is worth running on every diff that touches
 ## Agent bootstrap
 
 An agent registers itself over **REST**, like a kubelet registering its Node
-object — not over gRPC. `POST /v1alpha1/nodes` with a shared bootstrap token,
-its identity, and the gRPC address it wants the controller to dial.
+object. `POST /v1alpha1/nodes` with a shared bootstrap token and its identity
+— nothing else. Capacity, engine and usage are fetched by the controller after
+the probe succeeds, so the agent never describes a host it may not know yet.
 
-There is one token, held in the api's configuration. No token table. Rotation is
-restarting the api. See `docs/business-logics.md` §1.
-
-Tokens are never plain flag values: a flag is world-readable through `ps`. Use
-`--bootstrap.token-file` with mode 0600.
+There is one token, held in the api's configuration (`--bootstrap.token`).
+No token table. Rotation is restarting the api. See `docs/business-logics.md`
+§1.
 
 **Registration does not wait for the ack.** The api upserts the node as
 `NOTREADY`, publishes without blocking, and returns 200. That is safe because
@@ -106,10 +105,11 @@ Tokens are never plain flag values: a flag is world-readable through `ps`. Use
 a host nobody was told about. No outbox table is needed.
 
 **Node states are `READY` and `NOTREADY`** only. The **controller** probes the
-agent over gRPC (`Usage`, which round-trips through the engine) and sets
+agent over NATS (`usage`, which round-trips through the engine) and sets
 readiness from the answer; the api never sets it, and neither does the arrival of
 a bootstrap command. Probing repeats so a node that stops answering drops back
-out.
+out. A passing probe also fetches the engine and capacity (`info`) and records
+them on the node.
 
 `Node.NotReadyReason` says why — with one state covering every fault, an
 operator needs the reason. It is cleared on recovery and left alone on a node
@@ -117,9 +117,11 @@ an operator disabled. Because two states cannot distinguish "stopped answering"
 from "operator disabled", `Node.Enabled` carries that distinction and a probe
 must not override it.
 
-Agent addresses come from the bootstrap request and are read from the node
-record. Do **not** add an `--agent.nodes` flag: it would be a second copy of a
-fact the database holds, and the two would drift when an agent moves ports.
+Agents have no addresses. The node id **is** the address (`agent.<node-id>`
+on the bus), so there is nothing to configure, cache, or rediscover when an
+agent moves. Do **not** add address flags: they would be a second copy of a
+fact nobody needs to hold.
+
 
 **The controller does not run a compute engine.** It has no libvirt and no local
 KVM. Every VM lives on some agent; the controller's whole job is to pick which
@@ -127,39 +129,29 @@ agent and command it. So there is no `--driver` on `arsan controller`, and
 `driver.New` is only ever called by an agent to build the engine it will run.
 
 `internal/driver/remote` is not an engine. It implements `core.Driver` by
-forwarding each call to an agent over gRPC, so the scheduler and compute service
-need not know whether a VM is local or on another host.
+asking the agent over NATS, so the scheduler and compute service need not know
+whether a VM is local or on another host. An earlier version did this over
+gRPC; the transport moved to NATS request/reply so there is one transport to
+run, secure, and reason about.
 
-A node's engine is declared by the agent when it bootstraps and recorded on the
-node record; the controller reads it from there. There is no controller-side
-engine default, because the controller has no engine to default to.
-
-**Resolve an agent's address from the store, on every use.** An earlier design
-cached addresses in a process-global map keyed by node id. It was a second copy
-of a fact the database already holds, it was filled only by whichever controller
-consumed `node.registered` (so a second controller on the shared durable
-consumer never populated it, and it was empty after any restart), and it made a
-controller that trusted it fail on a healthy node. `DriverValidateFilter` drops
-hosts it cannot resolve a driver for, so the failure surfaced as "no eligible
-hosts" with nothing to act on. The map and `driver.RegisterRemote` are gone.
-
-The agent listens on its gRPC port *before* bootstrapping. `net.Listen` binds the
-port, so a connection arriving early queues in the backlog; bootstrapping first
-would open a window where the controller has been told the agent exists but
-cannot reach it.
+A node's engine and capacity are reported by the agent when the controller asks
+(`info`, after the probe succeeds) and recorded on the node record. They never
+travel at bootstrap. There is no controller-side engine default, because the
+controller has no engine to default to.
 
 **There is no heartbeat, and no timestamp-based liveness.** The agent
-bootstraps once over REST and afterwards only answers gRPC, because the
-controller reaches it directly. An earlier design aged nodes out on
-`LastHeartbeat`; since nothing ever sent a heartbeat, every node silently left
-service about 30s after registering. Readiness is the probe, and only the probe.
+bootstraps once over REST and afterwards only answers on the bus. An earlier
+design aged nodes out on `LastHeartbeat`; since nothing ever sent a heartbeat,
+every node silently left service about 30s after registering. Readiness is the
+probe, and only the probe.
 
 `Store.RecordUsage` records what an agent reports it is using and must not write
 `state`. Availability comes from reservations, never from a usage report, so a
 stale report cannot cause an overcommit.
 
-The agent's gRPC service is engine operations only. If you find yourself adding
-`Register` or `Heartbeat` RPCs to it, the design has drifted.
+The agent's worker answers engine operations only. If you find yourself adding
+identity or liveness to its protocol, the design has drifted: identity arrives
+at bootstrap, liveness is the controller's probe.
 
 ## CLI conventions
 
@@ -205,22 +197,14 @@ go build -o arsan .
 ## Run
 
 ```sh
-# REST API (also runs the loops it needs to serve correct state)
-./arsan api --driver=fake --addr=:8080
+# REST API (CRUD + commands onto the bus; no placement, no engine)
+./arsan api --addr=:8080 --bootstrap.token=s3cret
 
 # Control plane loops only, no HTTP
-./arsan controller --driver=fake
+./arsan controller
 
-# Compute node agent
-./arsan agent --node.id=n1 --node.name=compute-1 --node.address=host1:9090 \
-  --node.vcpu=8 --node.ram=16 --node.disk=200 --driver=fake --agent.addr=:9090
-
-# Controller (control plane only, no HTTP)
-./arsan controller --driver=fake
-
-# Remote engines: the controller dials each agent at the address it
-# declared when it bootstrapped. No address flag is needed.
-./arsan api --driver=remote
+# Compute node agent: token in, everything else learned by asking.
+./arsan agent --driver=fake -t s3cret
 ```
 
 ## Non-Negotiables
