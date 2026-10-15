@@ -75,6 +75,24 @@ func domainXML(name string, req core.CreateRequest) string {
 `, name, req.Flavor.RAM*1024, v.Count(), pinning, topology, req.ImageRef)
 }
 
+// pinsMatchDesc reports whether a domain XML description carries exactly
+// req's pinning, one vcpupin line per vCPU. Pure string matching against our
+// own rendering: no libvirt handle needed, so it is unit-testable.
+func pinsMatchDesc(desc string, req core.CreateRequest) bool {
+	if !req.Flavor.VCPU.Dedicated {
+		return true
+	}
+	if len(req.PinnedCPUs) != req.Flavor.VCPU.Count() {
+		return false
+	}
+	for i, cpu := range req.PinnedCPUs {
+		if !strings.Contains(desc, fmt.Sprintf("<vcpupin vcpu='%d' cpuset='%d'/>", i, cpu)) {
+			return false
+		}
+	}
+	return true
+}
+
 // cpuset renders pins as a libvirt cpuset: "0-3,7".
 func cpuset(pins []int) string {
 	sorted := slices.Clone(pins)

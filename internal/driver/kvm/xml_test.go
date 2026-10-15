@@ -51,6 +51,28 @@ func TestDomainXMLDedicated(t *testing.T) {
 	}
 }
 
+func TestPinsMatchDesc(t *testing.T) {
+	req := core.CreateRequest{
+		InstanceID: "i-2",
+		Flavor: core.Flavor{Name: "m1.dedicated",
+			VCPU: core.VCPU{Sockets: 1, Cores: 2, Threads: 1, Dedicated: true}},
+		PinnedCPUs: []int{4, 5},
+		ImageRef:   "/var/lib/libvirt/images/base.qcow2",
+	}
+	if !pinsMatchDesc(domainXML("arsan-i-2", req), req) {
+		t.Fatal("own rendering must match")
+	}
+	stale := req
+	stale.PinnedCPUs = []int{0, 1}
+	if pinsMatchDesc(domainXML("arsan-i-2", req), stale) {
+		t.Fatal("different pins must not match")
+	}
+	shared := core.CreateRequest{Flavor: core.Flavor{VCPU: core.VCPUCount(2)}}
+	if !pinsMatchDesc("<domain/>", shared) {
+		t.Fatal("shared flavors are always current")
+	}
+}
+
 func TestDomainNamePrefixes(t *testing.T) {
 	if got := domainName("i-1"); got != "arsan-i-1" {
 		t.Fatalf("got %q", got)
