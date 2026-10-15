@@ -84,6 +84,29 @@ func (d *Driver) lookup(name string) (*libvirt.Domain, error) {
 	return dom, nil
 }
 
+// pinsCurrent reports whether dom's definition already matches req's pinning.
+// Shared flavors have no pinning to drift, so they are always current. A
+// running domain counts as current however stale it looks: replacing its
+// definition under a live guest is worse than the drift, and live pin updates
+// are out of scope.
+func pinsCurrent(dom *libvirt.Domain, req core.CreateRequest) (bool, error) {
+	if !req.Flavor.VCPU.Dedicated {
+		return true, nil
+	}
+	desc, err := dom.GetXMLDesc(0)
+	if err != nil {
+		return false, err
+	}
+	if pinsMatchDesc(desc, req) {
+		return true, nil
+	}
+	state, _, err := dom.GetState()
+	if err != nil {
+		return false, err
+	}
+	return state == libvirt.DOMAIN_RUNNING, nil
+}
+
 // Validate checks the daemon answers and the flavor asks for something real.
 // It does not reserve anything; placement already claimed capacity.
 func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
@@ -103,7 +126,9 @@ func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
 }
 
 // Create defines the domain. It does not start it; Start does that. Defining
-// an already-defined domain is success, so a retried command is a no-op.
+// an already-defined domain is success, so a retried command is a no-op —
+// unless a dedicated flavor's pins drifted, in which case the stale
+// definition is replaced (never under a running guest).
 func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.InstanceInfo, error) {
 	info := core.InstanceInfo{ID: req.InstanceID, NodeID: req.NodeID, Driver: d.name}
 	if req.ImageRef == "" {
@@ -121,14 +146,25 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 		return core.InstanceInfo{}, err
 	}
 	req.ImageRef = disk
-	err := d.do(ctx, func() error {
+	err = d.do(ctx, func() error {
 		dom, err := d.lookup(domainName(req.InstanceID))
 		if err != nil {
 			return err
 		}
 		if dom != nil {
 			defer dom.Free()
-			return nil
+			// A retry is a no-op only when the definition is current. A
+			// rebuilt dedicated VM can arrive with different pins than the
+			// stale domain holds; keeping it would double-book CPUs the
+			// node record calls exclusive.
+			if current, err := pinsCurrent(dom, req); err != nil {
+				return err
+			} else if current {
+				return nil
+			}
+			if err := dom.Undefine(); err != nil {
+				return err
+			}
 		}
 		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req.InstanceID), req))
 		if err != nil {
