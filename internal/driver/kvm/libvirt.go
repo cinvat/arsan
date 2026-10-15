@@ -33,7 +33,7 @@ type Driver struct {
 // New connects to the local daemon. A missing daemon or missing headers at
 // build time is a clear startup error, not a failure on first use.
 func New() (*Driver, error) {
-	conn, err := libvirt.NewConnectToURI(uri)
+	conn, err := libvirt.NewConnect(uri)
 	if err != nil {
 		return nil, fmt.Errorf("kvm: connect to libvirt: %w", err)
 	}
@@ -90,7 +90,7 @@ func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
 		return fmt.Errorf("kvm: flavor %q has no resources: %w", f.Name, core.ErrRequestRejected)
 	}
 	return d.do(ctx, func() error {
-		_, err := d.conn.NodeGetInfo()
+		_, err := d.conn.GetNodeInfo()
 		if err != nil {
 			return fmt.Errorf("kvm: libvirt unreachable: %w", err)
 		}
@@ -249,7 +249,7 @@ func (d *Driver) Migrate(_ context.Context, _, _ string) error {
 func (d *Driver) HostCapacity(ctx context.Context) (core.Resources, error) {
 	var out core.Resources
 	err := d.do(ctx, func() error {
-		info, err := d.conn.NodeGetInfo()
+		info, err := d.conn.GetNodeInfo()
 		if err != nil {
 			return err
 		}
