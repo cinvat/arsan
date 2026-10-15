@@ -6,8 +6,6 @@ import (
 	"sync"
 
 	"github.com/cinvat/arsan/internal/core"
-	"github.com/cinvat/arsan/internal/driver/fake"
-	"github.com/cinvat/arsan/internal/driver/kvm"
 )
 
 // Factory builds a compute engine.
@@ -56,7 +54,5 @@ func New(name string) (core.Driver, error) {
 	return d, nil
 }
 
-func init() {
-	Register("fake", func() (core.Driver, error) { return fake.New(), nil })
-	Register("kvm", func() (core.Driver, error) { return kvm.New() })
-}
+// Engines register themselves from build-tagged files (register_fake.go,
+// register_kvm.go), so the set of available engines follows the build.

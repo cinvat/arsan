@@ -1,0 +1,288 @@
+//go:build kvm
+
+package kvm
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"sync"
+
+	libvirt "libvirt.org/go/libvirt"
+
+	"github.com/cinvat/arsan/internal/core"
+)
+
+// uri is empty so libvirt applies its default: LIBVIRT_DEFAULT_URI when set,
+// qemu:///system otherwise.
+const uri = ""
+
+// Driver runs VMs through the libvirt daemon directly.
+//
+// A libvirt connection serialises its calls internally, but a mutex keeps
+// concurrent engine operations from interleaving at this layer too. Blocking C
+// calls run in a goroutine so the caller's context still bounds them; on
+// timeout the call keeps running server-side and the goroutine is abandoned,
+// which is the documented cost of bounding a C call.
+type Driver struct {
+	mu   sync.Mutex
+	conn *libvirt.Connect
+	name string
+}
+
+// New connects to the local daemon. A missing daemon or missing headers at
+// build time is a clear startup error, not a failure on first use.
+func New() (*Driver, error) {
+	conn, err := libvirt.NewConnectToURI(uri)
+	if err != nil {
+		return nil, fmt.Errorf("kvm: connect to libvirt: %w", err)
+	}
+	return &Driver{conn: conn, name: "kvm"}, nil
+}
+
+func (d *Driver) Name() string { return d.name }
+
+// Close releases the connection. The agent calls it on shutdown.
+func (d *Driver) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, err := d.conn.Close()
+	return err
+}
+
+// do runs fn with the mutex held and bounded by ctx.
+func (d *Driver) do(ctx context.Context, fn func() error) error {
+	type result struct{ err error }
+	done := make(chan result, 1)
+	go func() {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		done <- result{fn()}
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case r := <-done:
+		return r.err
+	}
+}
+
+// lookup returns the domain handle, or nil when it is not defined. A lookup
+// miss is not an error here because every operation treats "already gone" as
+// success; callers that need existence check for nil themselves.
+//
+// The handle must be freed by the caller.
+func (d *Driver) lookup(name string) (*libvirt.Domain, error) {
+	dom, err := d.conn.LookupDomainByName(name)
+	if err != nil {
+		if errors.Is(err, libvirt.ERR_NO_DOMAIN) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return dom, nil
+}
+
+// Validate checks the daemon answers and the flavor asks for something real.
+// It does not reserve anything; placement already claimed capacity.
+func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
+	if f.VCPU <= 0 || f.RAM <= 0 || f.Disk <= 0 {
+		return fmt.Errorf("kvm: flavor %q has no resources: %w", f.Name, core.ErrRequestRejected)
+	}
+	return d.do(ctx, func() error {
+		_, err := d.conn.NodeGetInfo()
+		if err != nil {
+			return fmt.Errorf("kvm: libvirt unreachable: %w", err)
+		}
+		return nil
+	})
+}
+
+// Create defines the domain. It does not start it; Start does that. Defining
+// an already-defined domain is success, so a retried command is a no-op.
+func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.InstanceInfo, error) {
+	info := core.InstanceInfo{ID: req.InstanceID, NodeID: req.NodeID, Driver: d.name}
+	if req.ImageRef == "" {
+		return core.InstanceInfo{}, fmt.Errorf("kvm: image_ref is required and must name a qcow2 file on the host: %w", core.ErrRequestRejected)
+	}
+	err := d.do(ctx, func() error {
+		dom, err := d.lookup(domainName(req.InstanceID))
+		if err != nil {
+			return err
+		}
+		if dom != nil {
+			defer dom.Free()
+			return nil
+		}
+		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req.InstanceID), req))
+		if err != nil {
+			return err
+		}
+		defer dom.Free()
+		return nil
+	})
+	if err != nil {
+		return core.InstanceInfo{}, err
+	}
+	return info, nil
+}
+
+// running reports whether the domain is up. A missing domain is not an error;
+// callers decide what absence means for their operation.
+func (d *Driver) running(name string) (exists, running bool, err error) {
+	dom, err := d.lookup(name)
+	if err != nil || dom == nil {
+		return dom != nil, false, err
+	}
+	defer dom.Free()
+	state, _, err := dom.GetState()
+	if err != nil {
+		return true, false, err
+	}
+	return true, state == libvirt.DOMAIN_RUNNING, nil
+}
+
+// Start boots the domain. An already-running domain is success.
+func (d *Driver) Start(ctx context.Context, id string) error {
+	return d.do(ctx, func() error {
+		exists, running, err := d.running(domainName(id))
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return core.ErrInstanceNotFound
+		}
+		if running {
+			return nil
+		}
+		dom, err := d.lookup(domainName(id))
+		if err != nil || dom == nil {
+			return core.ErrInstanceNotFound
+		}
+		defer dom.Free()
+		return dom.Create()
+	})
+}
+
+// Stop shuts the domain down, destroying it if it refuses. A stopped or
+// missing domain is success.
+func (d *Driver) Stop(ctx context.Context, id string) error {
+	return d.do(ctx, func() error {
+		exists, running, err := d.running(domainName(id))
+		if err != nil {
+			return err
+		}
+		if !exists || !running {
+			return nil
+		}
+		dom, err := d.lookup(domainName(id))
+		if err != nil || dom == nil {
+			return nil
+		}
+		defer dom.Free()
+		if err := dom.Shutdown(); err != nil {
+			return dom.Destroy()
+		}
+		return nil
+	})
+}
+
+// Delete undefines the domain, stopping it first if needed. Storage is never
+// removed: the disk may be a shared base image. A missing domain is success.
+func (d *Driver) Delete(ctx context.Context, id string) error {
+	return d.do(ctx, func() error {
+		dom, err := d.lookup(domainName(id))
+		if err != nil || dom == nil {
+			return nil
+		}
+		defer dom.Free()
+		state, _, err := dom.GetState()
+		if err != nil {
+			return err
+		}
+		if state == libvirt.DOMAIN_RUNNING {
+			if err := dom.Destroy(); err != nil {
+				return err
+			}
+		}
+		return dom.Undefine()
+	})
+}
+
+// Reboot restarts the domain, falling back to stop+start when the guest path
+// fails.
+func (d *Driver) Reboot(ctx context.Context, id string) error {
+	err := d.do(ctx, func() error {
+		dom, err := d.lookup(domainName(id))
+		if err != nil {
+			return err
+		}
+		if dom == nil {
+			return core.ErrInstanceNotFound
+		}
+		defer dom.Free()
+		return dom.Reboot(libvirt.DOMAIN_REBOOT_DEFAULT)
+	})
+	if err != nil {
+		if errors.Is(err, core.ErrInstanceNotFound) {
+			return err
+		}
+		if serr := d.Stop(ctx, id); serr != nil {
+			return serr
+		}
+		return d.Start(ctx, id)
+	}
+	return nil
+}
+
+// Migrate is not implemented: live migration needs the target's libvirt URI
+// and shared storage, and this driver only knows a node id. Returning a clear
+// error beats attempting a half-migration.
+func (d *Driver) Migrate(_ context.Context, _, _ string) error {
+	return fmt.Errorf("kvm: live migration is not implemented")
+}
+
+// HostCapacity reports what the host actually has: CPUs and memory from the
+// node itself. Disk is not reported by libvirt at this level, so it is zero;
+// placement still accounts disk through reservations, and a zero here only
+// means "unknown", never "none".
+func (d *Driver) HostCapacity(ctx context.Context) (core.Resources, error) {
+	var out core.Resources
+	err := d.do(ctx, func() error {
+		info, err := d.conn.NodeGetInfo()
+		if err != nil {
+			return err
+		}
+		out = core.Resources{VCPU: int(info.Cpus), RAM: int(info.Memory / (1024 * 1024))}
+		return nil
+	})
+	return out, err
+}
+
+// Usage sums what running domains hold. Placement decisions come from
+// reservations, not from here; this is what the controller records and an
+// operator reads.
+func (d *Driver) Usage(ctx context.Context) (core.Resources, error) {
+	var out core.Resources
+	err := d.do(ctx, func() error {
+		doms, err := d.conn.ListAllDomains(0)
+		if err != nil {
+			return err
+		}
+		for i := range doms {
+			dom := &doms[i]
+			info, err := dom.GetInfo()
+			dom.Free()
+			if err != nil {
+				continue
+			}
+			if info.State != libvirt.DOMAIN_RUNNING {
+				continue
+			}
+			out.VCPU += int(info.NrVirtCpu)
+			out.RAM += int(info.Memory / (1024 * 1024))
+		}
+		return nil
+	})
+	return out, err
+}

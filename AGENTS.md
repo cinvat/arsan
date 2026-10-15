@@ -10,8 +10,8 @@ lifecycle via pluggable compute engines.
 
 **One binary, three cobra subcommands:** `api`, `controller`, `agent`.
 
-**Compute engines:** `fake` (in-memory, every platform), `kvm` (libvirt,
-Linux), `esxi` (VMware ESXi, future).
+**Compute engines:** `fake` (in-memory, every platform), `kvm` (native
+`libvirt.org/go/libvirt` bindings, Linux), `esxi` (VMware ESXi, future).
 
 ## Layout
 
@@ -199,6 +199,7 @@ its own path group, so v1alpha1 is served at `/v1alpha1/...`.
 
 ```sh
 go build ./... && go vet ./... && go test ./...
+# kvm engine (needs libvirt headers; Linux): go build -tags kvm ./...
 go test -race ./internal/scheduler/... ./internal/store/...
 go build -o arsan .
 ```
