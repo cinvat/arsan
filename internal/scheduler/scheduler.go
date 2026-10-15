@@ -1,19 +1,18 @@
 package scheduler
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/cinvat/arsan/internal/core"
-	"github.com/samber/lo"
 )
 
 const DefaultMaxAttempts = 5
-
-var MaxPlacementAttempts = DefaultMaxAttempts
 
 type DriverFor func(nodeID string) (core.Driver, error)
 
@@ -99,7 +98,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 		if len(eligible) == 0 {
 			return core.Placement{}, fmt.Errorf(
 				"attempt %d: %w (rejected by: %s)", attempt,
-				core.ErrNoValidNode, strings.Join(s.rejectReasons(req, nodes), ", "))
+				core.ErrNoValidNode, strings.Join(s.rejectReasons(ctx, req, nodes), ", "))
 		}
 
 		weighed, err := s.weigh(ctx, req, eligible)
@@ -157,10 +156,10 @@ func (s *Scheduler) runNodeFilters(ctx context.Context, req core.PlacementReques
 	return cur, nil
 }
 
-func (s *Scheduler) weigh(ctx context.Context, req core.PlacementRequest, nodes []core.Node) ([]WeighedHost, error) {
-	out := make([]WeighedHost, 0, len(nodes))
+func (s *Scheduler) weigh(ctx context.Context, req core.PlacementRequest, nodes []core.Node) ([]WeighedNode, error) {
+	out := make([]WeighedNode, 0, len(nodes))
 	for _, n := range nodes {
-		wh := WeighedHost{NodeID: n.ID, Detail: make(map[string]int, len(s.weighers))}
+		wh := WeighedNode{NodeID: n.ID, Detail: make(map[string]int, len(s.weighers))}
 		for _, w := range s.weighers {
 			v, err := w.WeightNode(ctx, req, n)
 			if err != nil {
@@ -178,19 +177,19 @@ func (s *Scheduler) weigh(ctx context.Context, req core.PlacementRequest, nodes 
 	return out, nil
 }
 
-type WeighedHost struct {
+type WeighedNode struct {
 	NodeID string
 	Score  int
 	Detail map[string]int
 }
 
-func best(nodes []WeighedHost) (WeighedHost, string) {
-	sorted := lo.Map(nodes, func(n WeighedHost, _ int) WeighedHost { return n })
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Score != sorted[j].Score {
-			return sorted[i].Score > sorted[j].Score
+func best(nodes []WeighedNode) (WeighedNode, string) {
+	sorted := slices.Clone(nodes)
+	slices.SortFunc(sorted, func(a, b WeighedNode) int {
+		if c := cmp.Compare(b.Score, a.Score); c != 0 {
+			return c
 		}
-		return sorted[i].NodeID < sorted[j].NodeID
+		return strings.Compare(a.NodeID, b.NodeID)
 	})
 	runnerUp := ""
 	if len(sorted) > 1 {
@@ -199,13 +198,13 @@ func best(nodes []WeighedHost) (WeighedHost, string) {
 	return sorted[0], runnerUp
 }
 
-func (s *Scheduler) rejectReasons(req core.PlacementRequest, nodes []core.Node) []string {
+func (s *Scheduler) rejectReasons(ctx context.Context, req core.PlacementRequest, nodes []core.Node) []string {
 	if len(nodes) == 0 {
 		return []string{"no nodes registered"}
 	}
 	var out []string
 	for _, f := range s.nodeFilters {
-		kept, err := f.FilterNodes(context.Background(), req, nodes)
+		kept, err := f.FilterNodes(ctx, req, nodes)
 		if err != nil {
 			continue
 		}
@@ -216,12 +215,12 @@ func (s *Scheduler) rejectReasons(req core.PlacementRequest, nodes []core.Node) 
 	return out
 }
 
-func explain(w WeighedHost, runnerUp string) string {
-	keys := lo.Keys(w.Detail)
-	sort.Strings(keys)
-	parts := lo.Map(keys, func(k string, _ int) string {
-		return fmt.Sprintf("%s=%d", k, w.Detail[k])
-	})
+func explain(w WeighedNode, runnerUp string) string {
+	keys := slices.Sorted(maps.Keys(w.Detail))
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, w.Detail[k]))
+	}
 	s := fmt.Sprintf("%s won with %s (total %d)", w.NodeID, strings.Join(parts, " "), w.Score)
 	if runnerUp != "" {
 		s += "; next best " + runnerUp

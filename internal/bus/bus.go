@@ -103,7 +103,6 @@ const (
 	TopicInstanceStart   = "instance.start"
 	TopicInstanceStop    = "instance.stop"
 	TopicInstanceMigrate = "instance.migrate"
-	TopicNodeReclaim     = "node.reclaim"
 	// TopicNodeRegistered is published by the api after a node's bootstrap
 	// is accepted, so the controller starts managing it.
 	TopicNodeRegistered = "node.registered"

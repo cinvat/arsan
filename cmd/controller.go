@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/cinvat/arsan/internal/app"
@@ -65,6 +67,10 @@ func subscribe(ctx context.Context, c *app.Controller, log app.Logger) error {
 	handlers := []handler{
 		{bus.TopicNodeRegistered, onNodeRegistered(c, log)},
 		{bus.TopicInstanceCreate, onInstanceCreate(c, log)},
+		{bus.TopicInstanceDelete, onInstanceDelete(c, log)},
+		{bus.TopicInstanceStart, onInstanceStart(c, log)},
+		{bus.TopicInstanceStop, onInstanceStop(c, log)},
+		{bus.TopicInstanceMigrate, onInstanceMigrate(c, log)},
 	}
 
 	for _, h := range handlers {
@@ -130,4 +136,75 @@ func init() {
 	controllerCmd.Flags().Duration("compute.driver-operation-timeout", 5*time.Minute, "deadline for a single compute engine call")
 
 	rootCmd.AddCommand(controllerCmd)
+}
+
+// A missing instance means the work is already done: the delete raced a
+// redelivery, or the row is gone. Ack it instead of failing forever.
+func notFoundIsGone(err error) error {
+	if err != nil && errors.Is(err, core.ErrInstanceNotFound) {
+		return nil
+	}
+	return err
+}
+
+// An illegal transition is permanent: the state machine rejected the command
+// for this state, and redelivering it changes nothing. Log it and ack, so one
+// mistimed request does not wedge the consumer behind endless redelivery.
+func invalidIsParked(log app.Logger, what, id string, err error) error {
+	if err != nil && errors.Is(err, core.ErrInvalidTransition) {
+		log.Warn("command parked: illegal transition", "command", what, "instance", id, "err", err)
+		return nil
+	}
+	return notFoundIsGone(err)
+}
+
+func onInstanceDelete(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		if err := c.Compute.Delete(ctx, cmd.Target); err != nil {
+			log.Error("delete failed", "instance", cmd.Target, "err", err)
+			return notFoundIsGone(err)
+		}
+		return nil
+	}
+}
+
+func onInstanceStart(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		if err := c.Compute.Start(ctx, cmd.Target); err != nil {
+			log.Error("start failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "start", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+func onInstanceStop(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		if err := c.Compute.Stop(ctx, cmd.Target); err != nil {
+			log.Error("stop failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "stop", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+func onInstanceMigrate(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		var payload struct {
+			TargetNodeID string `json:"target_node_id"`
+		}
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+			log.Error("migrate dropped: bad payload", "instance", cmd.Target, "err", err)
+			return nil
+		}
+		if payload.TargetNodeID == "" {
+			log.Error("migrate dropped: no target", "instance", cmd.Target)
+			return nil
+		}
+		if err := c.Compute.Migrate(ctx, cmd.Target, payload.TargetNodeID); err != nil {
+			log.Error("migrate failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "migrate", cmd.Target, err)
+		}
+		return nil
+	}
 }

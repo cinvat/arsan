@@ -18,8 +18,6 @@ import (
 	"github.com/cinvat/arsan/internal/compute"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/internal/driver/remote"
-	"github.com/cinvat/arsan/internal/message"
-	"github.com/cinvat/arsan/internal/node"
 	"github.com/cinvat/arsan/internal/scheduler"
 	"github.com/cinvat/arsan/internal/store/memory"
 )
@@ -42,10 +40,8 @@ type Logger interface {
 // and node liveness.
 type Controller struct {
 	Store     *memory.Store
-	Bus       *message.Bus
 	Scheduler *scheduler.Scheduler
 	Compute   *compute.Service
-	Node      *node.Service
 	Commands  bus.Bus
 	log       Logger
 }
@@ -55,13 +51,11 @@ type Controller struct {
 // never calls it.
 func NewController(cfg Config, commands bus.Bus, log Logger) (*Controller, error) {
 	store := memory.New()
-	events := message.New()
 
 	driverFor := drivers(store)
 
 	c := &Controller{
 		Store:    store,
-		Bus:      events,
 		Commands: commands,
 		Scheduler: scheduler.New(scheduler.Config{
 			Instances:   store,
@@ -73,18 +67,12 @@ func NewController(cfg Config, commands bus.Bus, log Logger) (*Controller, error
 		Compute: compute.New(compute.Config{
 			Instances:              store,
 			Nodes:                  store,
-			Bus:                    events,
 			DriverFor:              driverFor,
 			DriverOperationTimeout: cfg.ComputeDriverOpTimeout,
 			SweepInterval:          cfg.ComputeSweepInterval,
 			Log:                    log,
 		}),
 		log: log,
-		Node: node.New(node.Config{
-			Nodes: store,
-			Bus:   events,
-			Log:   log,
-		}),
 	}
 	return c, nil
 }

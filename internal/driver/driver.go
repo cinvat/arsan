@@ -2,7 +2,8 @@ package driver
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/cinvat/arsan/internal/core"
@@ -31,12 +32,7 @@ func Register(name string, f Factory) {
 func Names() []string {
 	mu.Lock()
 	defer mu.Unlock()
-	out := make([]string, 0, len(registry))
-	for n := range registry {
-		out = append(out, n)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(registry))
 }
 
 // New builds the named engine.

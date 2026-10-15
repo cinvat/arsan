@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -23,7 +22,11 @@ type ComputeNodeAgentClient interface {
 }
 
 func NewClient(addr string) (ComputeNodeAgentClient, error) {
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	registerCodec()
+	conn, err := grpc.NewClient(addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.CallContentSubtype(jsonCodec{}.Name())),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -34,45 +37,41 @@ type clientConn struct {
 	conn *grpc.ClientConn
 }
 
+func (c *clientConn) invoke(ctx context.Context, method string, req, resp any, opts ...grpc.CallOption) error {
+	return c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/"+method, req, resp, opts...)
+}
+
 func (c *clientConn) Create(ctx context.Context, req *CreateRequest, opts ...grpc.CallOption) (*CreateResponse, error) {
 	var resp CreateResponse
-	err := c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/Create", req, &resp, opts...)
-	return &resp, err
+	return &resp, c.invoke(ctx, "Create", req, &resp, opts...)
 }
 func (c *clientConn) Start(ctx context.Context, req *StartRequest, opts ...grpc.CallOption) (*StartResponse, error) {
 	var resp StartResponse
-	err := c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/Start", req, &resp, opts...)
-	return &resp, err
+	return &resp, c.invoke(ctx, "Start", req, &resp, opts...)
 }
 func (c *clientConn) Stop(ctx context.Context, req *StopRequest, opts ...grpc.CallOption) (*StopResponse, error) {
 	var resp StopResponse
-	err := c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/Stop", req, &resp, opts...)
-	return &resp, err
+	return &resp, c.invoke(ctx, "Stop", req, &resp, opts...)
 }
 func (c *clientConn) Delete(ctx context.Context, req *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error) {
 	var resp DeleteResponse
-	err := c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/Delete", req, &resp, opts...)
-	return &resp, err
+	return &resp, c.invoke(ctx, "Delete", req, &resp, opts...)
 }
 func (c *clientConn) Reboot(ctx context.Context, req *RebootRequest, opts ...grpc.CallOption) (*RebootResponse, error) {
 	var resp RebootResponse
-	err := c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/Reboot", req, &resp, opts...)
-	return &resp, err
+	return &resp, c.invoke(ctx, "Reboot", req, &resp, opts...)
 }
 func (c *clientConn) Migrate(ctx context.Context, req *MigrateRequest, opts ...grpc.CallOption) (*MigrateResponse, error) {
 	var resp MigrateResponse
-	err := c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/Migrate", req, &resp, opts...)
-	return &resp, err
+	return &resp, c.invoke(ctx, "Migrate", req, &resp, opts...)
 }
 func (c *clientConn) Usage(ctx context.Context, req *UsageRequest, opts ...grpc.CallOption) (*UsageResponse, error) {
 	var resp UsageResponse
-	err := c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/Usage", req, &resp, opts...)
-	return &resp, err
+	return &resp, c.invoke(ctx, "Usage", req, &resp, opts...)
 }
 func (c *clientConn) Validate(ctx context.Context, req *ValidateRequest, opts ...grpc.CallOption) (*ValidateResponse, error) {
 	var resp ValidateResponse
-	err := c.conn.Invoke(ctx, "/agent.ComputeNodeAgent/Validate", req, &resp, opts...)
-	return &resp, err
+	return &resp, c.invoke(ctx, "Validate", req, &resp, opts...)
 }
 func (c *clientConn) Close() error {
 	return c.conn.Close()
@@ -93,144 +92,51 @@ type ComputeNodeAgentServer interface {
 }
 
 func RegisterServer(s *grpc.Server, impl ComputeNodeAgentServer) {
+	registerCodec()
 	s.RegisterService(&_ComputeNodeAgent_serviceDesc, impl)
+}
+
+// handler builds the gRPC method handler for one engine operation. The eight
+// operations differ only in request type and method, so they share this
+// instead of eight copies of the decode/dispatch boilerplate.
+func handler[Req any, Resp any](method string, newReq func() *Req, call func(ComputeNodeAgentServer, context.Context, *Req) (*Resp, error)) grpc.MethodDesc {
+	return grpc.MethodDesc{
+		MethodName: method,
+		Handler: func(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+			in := newReq()
+			if err := dec(in); err != nil {
+				return nil, err
+			}
+			svc := srv.(ComputeNodeAgentServer)
+			if interceptor == nil {
+				return call(svc, ctx, in)
+			}
+			invoke := func(ctx context.Context, req interface{}) (interface{}, error) {
+				return call(svc, ctx, req.(*Req))
+			}
+			return interceptor(ctx, in, &grpc.UnaryServerInfo{
+				Server:     srv,
+				FullMethod: "/agent.ComputeNodeAgent/" + method,
+			}, invoke)
+		},
+	}
 }
 
 var _ComputeNodeAgent_serviceDesc = grpc.ServiceDesc{
 	ServiceName: "agent.ComputeNodeAgent",
 	HandlerType: (*ComputeNodeAgentServer)(nil),
 	Methods: []grpc.MethodDesc{
-		{MethodName: "Create", Handler: _Create_Handler},
-		{MethodName: "Start", Handler: _Start_Handler},
-		{MethodName: "Stop", Handler: _Stop_Handler},
-		{MethodName: "Delete", Handler: _Delete_Handler},
-		{MethodName: "Reboot", Handler: _Reboot_Handler},
-		{MethodName: "Migrate", Handler: _Migrate_Handler},
-		{MethodName: "Usage", Handler: _Usage_Handler},
-		{MethodName: "Validate", Handler: _Validate_Handler},
+		handler("Create", func() *CreateRequest { return new(CreateRequest) }, ComputeNodeAgentServer.Create),
+		handler("Start", func() *StartRequest { return new(StartRequest) }, ComputeNodeAgentServer.Start),
+		handler("Stop", func() *StopRequest { return new(StopRequest) }, ComputeNodeAgentServer.Stop),
+		handler("Delete", func() *DeleteRequest { return new(DeleteRequest) }, ComputeNodeAgentServer.Delete),
+		handler("Reboot", func() *RebootRequest { return new(RebootRequest) }, ComputeNodeAgentServer.Reboot),
+		handler("Migrate", func() *MigrateRequest { return new(MigrateRequest) }, ComputeNodeAgentServer.Migrate),
+		handler("Usage", func() *UsageRequest { return new(UsageRequest) }, ComputeNodeAgentServer.Usage),
+		handler("Validate", func() *ValidateRequest { return new(ValidateRequest) }, ComputeNodeAgentServer.Validate),
 	},
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "agent.proto",
-}
-
-func _Create_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CreateRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ComputeNodeAgentServer).Create(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/agent.ComputeNodeAgent/Create"}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ComputeNodeAgentServer).Create(ctx, req.(*CreateRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Start_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(StartRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ComputeNodeAgentServer).Start(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/agent.ComputeNodeAgent/Start"}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ComputeNodeAgentServer).Start(ctx, req.(*StartRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Stop_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(StopRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ComputeNodeAgentServer).Stop(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/agent.ComputeNodeAgent/Stop"}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ComputeNodeAgentServer).Stop(ctx, req.(*StopRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DeleteRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ComputeNodeAgentServer).Delete(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/agent.ComputeNodeAgent/Delete"}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ComputeNodeAgentServer).Delete(ctx, req.(*DeleteRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Reboot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RebootRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ComputeNodeAgentServer).Reboot(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/agent.ComputeNodeAgent/Reboot"}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ComputeNodeAgentServer).Reboot(ctx, req.(*RebootRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Migrate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MigrateRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ComputeNodeAgentServer).Migrate(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/agent.ComputeNodeAgent/Migrate"}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ComputeNodeAgentServer).Migrate(ctx, req.(*MigrateRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Usage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UsageRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ComputeNodeAgentServer).Usage(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/agent.ComputeNodeAgent/Usage"}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ComputeNodeAgentServer).Usage(ctx, req.(*UsageRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Validate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ValidateRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ComputeNodeAgentServer).Validate(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{Server: srv, FullMethod: "/agent.ComputeNodeAgent/Validate"}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ComputeNodeAgentServer).Validate(ctx, req.(*ValidateRequest))
-	}
-	return interceptor(ctx, in, info, handler)
 }
 
 // Messages
@@ -346,8 +252,4 @@ func FromCoreFlavor(f core.Flavor) Flavor {
 
 func ToCoreFlavor(f Flavor) core.Flavor {
 	return core.Flavor{Name: f.Name, VCPU: int(f.VCPU), RAM: int(f.RAM), Disk: int(f.Disk)}
-}
-
-func WithTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, d)
 }

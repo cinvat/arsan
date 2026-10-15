@@ -6,15 +6,12 @@ import (
 	"time"
 
 	"github.com/cinvat/arsan/internal/core"
-	"github.com/cinvat/arsan/internal/message"
 )
 
 const (
-	MaxRebuildAttempts       = 10
-	DefaultDriverOpTimeout   = 5 * time.Minute
-	DefaultSweepInterval     = 30 * time.Second
-	DefaultStaleAfter        = 2 * time.Minute
-	DefaultMaxRebuildBackoff = 5 * time.Minute
+	DefaultDriverOpTimeout = 5 * time.Minute
+	DefaultSweepInterval   = 30 * time.Second
+	DefaultStaleAfter      = 2 * time.Minute
 )
 
 type DriverFor func(nodeID string) (core.Driver, error)
@@ -22,13 +19,11 @@ type DriverFor func(nodeID string) (core.Driver, error)
 type Config struct {
 	Instances              core.InstanceStore
 	Nodes                  core.NodeStore
-	Bus                    *message.Bus
 	Scheduler              core.Scheduler
 	DriverFor              DriverFor
 	DriverOperationTimeout time.Duration
 	SweepInterval          time.Duration
 	StaleAfter             time.Duration
-	MaxRebuildBackoff      time.Duration
 	Log                    Logger
 }
 
@@ -52,27 +47,7 @@ func New(cfg Config) *Service {
 	if cfg.StaleAfter == 0 {
 		cfg.StaleAfter = DefaultStaleAfter
 	}
-	if cfg.MaxRebuildBackoff == 0 {
-		cfg.MaxRebuildBackoff = DefaultMaxRebuildBackoff
-	}
 	return &Service{cfg: cfg}
-}
-
-func (s *Service) Create(ctx context.Context, req core.CreateInstanceRequest) (core.Instance, error) {
-	inst := core.Instance{
-		ID:        newID(),
-		Name:      req.Name,
-		Flavor:    req.Flavor,
-		ImageRef:  req.ImageRef,
-		State:     core.StatePending,
-		CreatedAt: time.Now().UTC(),
-	}
-	created, err := s.cfg.Instances.Create(ctx, inst)
-	if err != nil {
-		return core.Instance{}, fmt.Errorf("create instance: %w", err)
-	}
-	s.cfg.Bus.Publish(message.Event{Topic: message.TopicInstanceCreated, Payload: created.ID})
-	return created, nil
 }
 
 func (s *Service) Get(ctx context.Context, id string) (core.Instance, error) {
@@ -94,7 +69,24 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 			_ = d.Stop(ctx, id)
 		}
 	}
+	// The row goes away but the claim must come back first, or every deleted
+	// VM permanently shrinks its node.
+	if err := s.cfg.Instances.ReleaseReservations(ctx, inst.ID, inst.NodeID); err != nil {
+		s.cfg.Log.Error("reservation leak", "instance", id, "node", inst.NodeID, "err", err)
+	}
 	return s.cfg.Instances.Delete(ctx, id)
+}
+
+// withEngine resolves the engine for the node holding id and runs fn against
+// it, bounded by the operation timeout.
+func (s *Service) withEngine(ctx context.Context, nodeID string, fn func(context.Context, core.Driver) error) error {
+	d, err := s.cfg.DriverFor(nodeID)
+	if err != nil {
+		return err
+	}
+	dctx, cancel := context.WithTimeout(ctx, s.cfg.DriverOperationTimeout)
+	defer cancel()
+	return fn(dctx, d)
 }
 
 func (s *Service) Start(ctx context.Context, id string) error {
@@ -105,7 +97,15 @@ func (s *Service) Start(ctx context.Context, id string) error {
 	if inst.State != core.StateShutoff {
 		return fmt.Errorf("start: %w", core.ErrInvalidTransition)
 	}
-	return s.build(ctx, id)
+	// Boot it where it already lives: the claim and placement survived the
+	// stop, so there is nothing to schedule.
+	if err := s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
+		return d.Start(dctx, id)
+	}); err != nil {
+		return err
+	}
+	_, err = s.cfg.Instances.Transition(ctx, id, core.StateShutoff, core.StateActive)
+	return err
 }
 
 func (s *Service) Stop(ctx context.Context, id string) error {
@@ -117,13 +117,9 @@ func (s *Service) Stop(ctx context.Context, id string) error {
 		return fmt.Errorf("stop: %w", core.ErrInvalidTransition)
 	}
 
-	d, err := s.cfg.DriverFor(inst.NodeID)
-	if err != nil {
-		return err
-	}
-	dctx, cancel := context.WithTimeout(ctx, s.cfg.DriverOperationTimeout)
-	defer cancel()
-	if err := d.Stop(dctx, id); err != nil {
+	if err := s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
+		return d.Stop(dctx, id)
+	}); err != nil {
 		return err
 	}
 
@@ -140,13 +136,9 @@ func (s *Service) Migrate(ctx context.Context, id, targetNodeID string) error {
 		return fmt.Errorf("migrate: %w", core.ErrInvalidTransition)
 	}
 
-	d, err := s.cfg.DriverFor(inst.NodeID)
-	if err != nil {
-		return err
-	}
-	dctx, cancel := context.WithTimeout(ctx, s.cfg.DriverOperationTimeout)
-	defer cancel()
-	return d.Migrate(dctx, id, targetNodeID)
+	return s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
+		return d.Migrate(dctx, id, targetNodeID)
+	})
 }
 
 // Build drives a PENDING instance to ACTIVE: schedule, claim, create on the
@@ -187,27 +179,20 @@ func (s *Service) build(ctx context.Context, id string) error {
 		return fmt.Errorf("record placement: %w", err)
 	}
 
-	d, err := s.cfg.DriverFor(placed.NodeID)
-	if err != nil {
-		return s.fail(ctx, id, core.StateScheduling, err)
-	}
-
-	dctx, cancel := context.WithTimeout(ctx, s.cfg.DriverOperationTimeout)
-	defer cancel()
-
-	if _, err := d.Create(dctx, core.CreateRequest{
-		InstanceID: id, NodeID: placed.NodeID, Name: inst.Name,
-		Flavor: inst.Flavor, ImageRef: inst.ImageRef,
+	if err := s.withEngine(ctx, placed.NodeID, func(dctx context.Context, d core.Driver) error {
+		if _, err := d.Create(dctx, core.CreateRequest{
+			InstanceID: id, NodeID: placed.NodeID, Name: inst.Name,
+			Flavor: inst.Flavor, ImageRef: inst.ImageRef,
+		}); err != nil {
+			return err
+		}
+		return d.Start(dctx, id)
 	}); err != nil {
 		return s.fail(ctx, id, core.StateScheduling, err)
 	}
 
 	if _, err := s.cfg.Instances.Transition(ctx, id, core.StateScheduling, core.StateBuilding); err != nil {
 		return fmt.Errorf("enter building: %w", err)
-	}
-
-	if err := d.Start(dctx, id); err != nil {
-		return s.fail(ctx, id, core.StateBuilding, err)
 	}
 
 	_, err = s.cfg.Instances.Transition(ctx, id, core.StateBuilding, core.StateActive)
@@ -261,63 +246,12 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		if err := s.cfg.Instances.ReleaseReservations(ctx, i.ID, i.NodeID); err != nil {
 			s.cfg.Log.Error("sweep release", "instance", i.ID, "err", err)
 		}
-		s.cfg.Bus.Publish(message.Event{Topic: message.TopicInstanceCreated, Payload: i.ID})
-	}
-	return nil
-}
-
-func (s *Service) HandleNodeDown(ctx context.Context, failedNodeID string) error {
-	all, err := s.cfg.Instances.List(ctx)
-	if err != nil {
-		return fmt.Errorf("list instances: %w", err)
-	}
-
-	for _, inst := range all {
-		if inst.NodeID != failedNodeID {
-			continue
-		}
-		if inst.State == core.StateShutoff || inst.State == core.StateError {
-			continue
-		}
-		if err := s.rebuild(ctx, inst, failedNodeID); err != nil {
-			s.cfg.Log.Error("rebuild", "instance", inst.ID, "err", err)
+		// Re-drive the build here rather than publishing: the retry path owns
+		// everything Build needs, and the event it used to emit had no
+		// subscribers, so a reset instance sat PENDING forever.
+		if err := s.build(ctx, i.ID); err != nil {
+			s.cfg.Log.Warn("sweep rebuild", "instance", i.ID, "err", err)
 		}
 	}
 	return nil
-}
-
-func (s *Service) rebuild(ctx context.Context, inst core.Instance, failedNodeID string) error {
-	if wait := backoff(inst.Generation); wait > 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
-		}
-	}
-
-	if err := s.cfg.Instances.ReleaseReservations(ctx, inst.ID, failedNodeID); err != nil {
-		return fmt.Errorf("release: %w", err)
-	}
-
-	if _, err := s.cfg.Instances.Transition(ctx, inst.ID, inst.State, core.StatePending); err != nil {
-		return fmt.Errorf("reset to pending: %w", err)
-	}
-
-	_, err := s.cfg.Scheduler.Schedule(ctx, core.PlacementRequest{
-		InstanceID:     inst.ID,
-		Flavor:         inst.Flavor,
-		ImageRef:       inst.ImageRef,
-		ExcludeNodeIDs: []string{failedNodeID},
-		Generation:     inst.Generation + 1,
-	})
-	return err
-}
-
-func backoff(generation int) time.Duration {
-	d := time.Duration(1<<min(generation, 8)) * time.Second
-	return min(d, 5*time.Minute)
-}
-
-func newID() string {
-	return fmt.Sprintf("i-%d", time.Now().UnixNano())
 }

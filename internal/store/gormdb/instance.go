@@ -253,19 +253,6 @@ func (s *Store) SetReadiness(ctx context.Context, id string, state core.NodeStat
 	return s.GetNode(ctx, id)
 }
 
-func (s *Store) SetState(ctx context.Context, id string, state core.NodeState) (core.Node, error) {
-	res := s.withTimeout(ctx).Model(&nodeRow{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"state": string(state), "updated_at": time.Now().UTC()})
-	if res.Error != nil {
-		return core.Node{}, fmt.Errorf("set state %s: %w", id, res.Error)
-	}
-	if res.RowsAffected == 0 {
-		return core.Node{}, fmt.Errorf("set state %s: %w", id, core.ErrNodeNotFound)
-	}
-	return s.GetNode(ctx, id)
-}
-
 // Heartbeat records liveness and reported usage. Reported usage is
 // informational: available capacity is derived from reservations, so a stale or
 // wrong report cannot cause an overcommit.

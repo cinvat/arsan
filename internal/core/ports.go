@@ -54,11 +54,10 @@ type NodeStore interface {
 	Register(ctx context.Context, n Node) (Node, error)
 	GetNode(ctx context.Context, id string) (Node, error)
 	ListNodes(ctx context.Context) ([]Node, error)
-	SetState(ctx context.Context, id string, s NodeState) (Node, error)
 	// SetNodeEnabled takes a node in or out of service. It is separate from
 	// state because with only READY and NOTREADY, "operator disabled it" and
-	// "it stopped answering" would be indistinguishable — and a heartbeat must
-	// not be able to undo an operator's decision.
+	// "it stopped answering" would be indistinguishable — and a probe must not
+	// override an operator's decision.
 	SetNodeEnabled(ctx context.Context, id string, enabled bool) (Node, error)
 	// SetReadiness sets a node's readiness together with the reason it is not
 	// ready. Passing an empty reason marks it READY.

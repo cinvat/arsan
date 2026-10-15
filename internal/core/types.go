@@ -19,6 +19,23 @@ type Resources struct {
 	Disk int
 }
 
+// AddCapped returns capacity with ret released, never exceeding total.
+// Releasing more than was reserved (a retried delete, a stale report) must
+// not invent capacity the host never had.
+func (r Resources) AddCapped(ret, total Resources) Resources {
+	out := r.Add(ret)
+	if out.VCPU > total.VCPU {
+		out.VCPU = total.VCPU
+	}
+	if out.RAM > total.RAM {
+		out.RAM = total.RAM
+	}
+	if out.Disk > total.Disk {
+		out.Disk = total.Disk
+	}
+	return out
+}
+
 func (r Resources) Fits(other Resources) bool {
 	return r.VCPU >= other.VCPU && r.RAM >= other.RAM && r.Disk >= other.Disk
 }

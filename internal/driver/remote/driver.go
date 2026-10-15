@@ -11,11 +11,6 @@ import (
 
 const defaultTimeout = 30 * time.Second
 
-type Params struct {
-	NodeID string
-	Addr   string
-}
-
 type Driver struct {
 	client agent.ComputeNodeAgentClient
 	nodeID string
@@ -32,17 +27,31 @@ func New(nodeID, addr string) (*Driver, error) {
 
 func (d *Driver) Name() string { return d.name }
 
-func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
+// roundTrip bounds the call and translates the agent's success envelope into
+// an error. Every engine operation is the same shape — a bounded call whose
+// failure arrives either as a transport error or as success=false — so they
+// share this instead of repeating it eight times.
+func (d *Driver) roundTrip(ctx context.Context, op string, fn func(context.Context) (bool, string, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
-	resp, err := d.client.Validate(ctx, &agent.ValidateRequest{Flavor: agent.FromCoreFlavor(f)})
+	ok, msg, err := fn(ctx)
 	if err != nil {
 		return err
 	}
-	if !resp.CanRun {
-		return fmt.Errorf("validate: %s", resp.Message)
+	if !ok {
+		return fmt.Errorf("%s: %s", op, msg)
 	}
 	return nil
+}
+
+func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
+	return d.roundTrip(ctx, "validate", func(ctx context.Context) (bool, string, error) {
+		resp, err := d.client.Validate(ctx, &agent.ValidateRequest{Flavor: agent.FromCoreFlavor(f)})
+		if err != nil {
+			return false, "", err
+		}
+		return resp.CanRun, resp.Message, nil
+	})
 }
 
 func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.InstanceInfo, error) {
@@ -70,71 +79,56 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 }
 
 func (d *Driver) Start(ctx context.Context, id string) error {
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	resp, err := d.client.Start(ctx, &agent.StartRequest{InstanceID: id})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("start: %s", resp.Message)
-	}
-	return nil
+	return d.roundTrip(ctx, "start", func(ctx context.Context) (bool, string, error) {
+		resp, err := d.client.Start(ctx, &agent.StartRequest{InstanceID: id})
+		if err != nil {
+			return false, "", err
+		}
+		return resp.Success, resp.Message, nil
+	})
 }
 
 func (d *Driver) Stop(ctx context.Context, id string) error {
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	resp, err := d.client.Stop(ctx, &agent.StopRequest{InstanceID: id})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("stop: %s", resp.Message)
-	}
-	return nil
+	return d.roundTrip(ctx, "stop", func(ctx context.Context) (bool, string, error) {
+		resp, err := d.client.Stop(ctx, &agent.StopRequest{InstanceID: id})
+		if err != nil {
+			return false, "", err
+		}
+		return resp.Success, resp.Message, nil
+	})
 }
 
 func (d *Driver) Delete(ctx context.Context, id string) error {
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	resp, err := d.client.Delete(ctx, &agent.DeleteRequest{InstanceID: id})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("delete: %s", resp.Message)
-	}
-	return nil
+	return d.roundTrip(ctx, "delete", func(ctx context.Context) (bool, string, error) {
+		resp, err := d.client.Delete(ctx, &agent.DeleteRequest{InstanceID: id})
+		if err != nil {
+			return false, "", err
+		}
+		return resp.Success, resp.Message, nil
+	})
 }
 
 func (d *Driver) Reboot(ctx context.Context, id string) error {
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	resp, err := d.client.Reboot(ctx, &agent.RebootRequest{InstanceID: id})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("reboot: %s", resp.Message)
-	}
-	return nil
+	return d.roundTrip(ctx, "reboot", func(ctx context.Context) (bool, string, error) {
+		resp, err := d.client.Reboot(ctx, &agent.RebootRequest{InstanceID: id})
+		if err != nil {
+			return false, "", err
+		}
+		return resp.Success, resp.Message, nil
+	})
 }
 
 func (d *Driver) Migrate(ctx context.Context, id, targetNodeID string) error {
-	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
-	defer cancel()
-	resp, err := d.client.Migrate(ctx, &agent.MigrateRequest{
-		InstanceID:   id,
-		TargetNodeID: targetNodeID,
+	return d.roundTrip(ctx, "migrate", func(ctx context.Context) (bool, string, error) {
+		resp, err := d.client.Migrate(ctx, &agent.MigrateRequest{
+			InstanceID:   id,
+			TargetNodeID: targetNodeID,
+		})
+		if err != nil {
+			return false, "", err
+		}
+		return resp.Success, resp.Message, nil
 	})
-	if err != nil {
-		return err
-	}
-	if !resp.Success {
-		return fmt.Errorf("migrate: %s", resp.Message)
-	}
-	return nil
 }
 
 func (d *Driver) Usage(ctx context.Context) (core.Resources, error) {

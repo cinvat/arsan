@@ -1,9 +1,11 @@
 package memory
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -58,9 +60,8 @@ func (s *Store) List(ctx context.Context) ([]core.Instance, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := lo.Values(s.instances)
-	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
-	return out, nil
+	return slices.SortedFunc(maps.Values(s.instances),
+		func(a, b core.Instance) int { return cmp.Compare(a.ID, b.ID) }), nil
 }
 
 func (s *Store) Update(ctx context.Context, i core.Instance) (core.Instance, error) {
@@ -129,16 +130,7 @@ func (s *Store) ReleaseReservations(ctx context.Context, instanceID, nodeID stri
 	if !ok {
 		return nil
 	}
-	n.Available = n.Available.Add(i.Flavor.Resources())
-	if n.Available.VCPU > n.Total.VCPU {
-		n.Available.VCPU = n.Total.VCPU
-	}
-	if n.Available.RAM > n.Total.RAM {
-		n.Available.RAM = n.Total.RAM
-	}
-	if n.Available.Disk > n.Total.Disk {
-		n.Available.Disk = n.Total.Disk
-	}
+	n.Available = n.Available.AddCapped(i.Flavor.Resources(), n.Total)
 	n.Instances = lo.Filter(n.Instances, func(s string, _ int) bool { return s != instanceID })
 	s.nodes[nodeID] = n
 	return nil
@@ -182,9 +174,8 @@ func (s *Store) ListNodes(ctx context.Context) ([]core.Node, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := lo.Values(s.nodes)
-	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
-	return out, nil
+	return slices.SortedFunc(maps.Values(s.nodes),
+		func(a, b core.Node) int { return cmp.Compare(a.ID, b.ID) }), nil
 }
 
 // SetNodeEnabled takes a node in or out of service without touching its state.
@@ -199,9 +190,6 @@ func (s *Store) SetNodeEnabled(ctx context.Context, id string, enabled bool) (co
 		return core.Node{}, fmt.Errorf("set enabled %s: %w", id, core.ErrNodeNotFound)
 	}
 	n.Enabled = enabled
-	if !enabled {
-		n.State = core.NodeNotReady
-	}
 	s.nodes[id] = n
 	return n, nil
 }
@@ -223,21 +211,6 @@ func (s *Store) SetReadiness(ctx context.Context, id string, state core.NodeStat
 	return n, nil
 }
 
-func (s *Store) SetState(ctx context.Context, id string, state core.NodeState) (core.Node, error) {
-	if err := ctx.Err(); err != nil {
-		return core.Node{}, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n, ok := s.nodes[id]
-	if !ok {
-		return core.Node{}, fmt.Errorf("set state %s: %w", id, core.ErrNodeNotFound)
-	}
-	n.State = state
-	s.nodes[id] = n
-	return n, nil
-}
-
 func (s *Store) RecordUsage(ctx context.Context, id string, usage core.Resources, at time.Time) (core.Node, error) {
 	if err := ctx.Err(); err != nil {
 		return core.Node{}, err
@@ -246,7 +219,7 @@ func (s *Store) RecordUsage(ctx context.Context, id string, usage core.Resources
 	defer s.mu.Unlock()
 	n, ok := s.nodes[id]
 	if !ok {
-		return core.Node{}, fmt.Errorf("heartbeat %s: %w", id, core.ErrNodeNotFound)
+		return core.Node{}, fmt.Errorf("record usage %s: %w", id, core.ErrNodeNotFound)
 	}
 	n.LastHeartbeat = at
 	// A heartbeat records usage; it does not set readiness. Readiness is the
@@ -286,16 +259,7 @@ func (s *Store) ReleaseNodeResources(ctx context.Context, nodeID string, r core.
 	if !ok {
 		return nil
 	}
-	n.Available = n.Available.Add(r)
-	if n.Available.VCPU > n.Total.VCPU {
-		n.Available.VCPU = n.Total.VCPU
-	}
-	if n.Available.RAM > n.Total.RAM {
-		n.Available.RAM = n.Total.RAM
-	}
-	if n.Available.Disk > n.Total.Disk {
-		n.Available.Disk = n.Total.Disk
-	}
+	n.Available = n.Available.AddCapped(r, n.Total)
 	s.nodes[nodeID] = n
 	return nil
 }

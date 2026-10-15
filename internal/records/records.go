@@ -14,6 +14,7 @@ package records
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -76,9 +77,13 @@ func (s *Nodes) Enable(ctx context.Context, id string) error {
 }
 
 // Disable takes a node out of service. It stops receiving new VMs immediately
-// and no probe may undo it.
+// and no probe may undo it. The reason names the operator, so a later probe
+// failure cannot misdescribe their decision as a broken agent.
 func (s *Nodes) Disable(ctx context.Context, id string) error {
-	_, err := s.Store.SetNodeEnabled(ctx, id, false)
+	if _, err := s.Store.SetNodeEnabled(ctx, id, false); err != nil {
+		return err
+	}
+	_, err := s.Store.SetReadiness(ctx, id, core.NodeNotReady, "disabled by operator")
 	return err
 }
 
@@ -164,22 +169,30 @@ func (s *Instances) Migrate(ctx context.Context, id, targetNodeID string) error 
 	if targetNodeID == "" {
 		return fmt.Errorf("target_node_id required: %w", core.ErrInvalidRequest)
 	}
-	if err := s.command(ctx, bus.TopicInstanceMigrate, id); err != nil {
+	// The target travels in the payload: the command carries the target it
+	// concerns plus its own data, never a snapshot of the record.
+	payload, err := json.Marshal(map[string]string{"target_node_id": targetNodeID})
+	if err != nil {
 		return err
 	}
-	return nil
+	return s.publish(ctx, bus.TopicInstanceMigrate, id, payload)
 }
 
 func (s *Instances) command(ctx context.Context, topic, target string) error {
+	return s.publish(ctx, topic, target, nil)
+}
+
+func (s *Instances) publish(ctx context.Context, topic, target string, payload []byte) error {
 	if _, err := s.Store.Get(ctx, target); err != nil {
 		// 404 before publishing, so a client does not get a 202 for a
 		// command that can only fail.
 		return err
 	}
 	if err := s.Bus.Publish(ctx, bus.Command{
-		ID:     util.NewID("cmd"),
-		Topic:  topic,
-		Target: target,
+		ID:      util.NewID("cmd"),
+		Topic:   topic,
+		Target:  target,
+		Payload: payload,
 	}); err != nil {
 		return fmt.Errorf("enqueue %s: %w", topic, err)
 	}

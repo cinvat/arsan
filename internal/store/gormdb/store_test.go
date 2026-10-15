@@ -400,7 +400,7 @@ func TestAttachMissingNode(t *testing.T) {
 
 func TestSetStateMissingNode(t *testing.T) {
 	s := newStore(t)
-	if _, err := s.SetState(t.Context(), "ghost", core.NodeReady); !errors.Is(err, core.ErrNodeNotFound) {
+	if _, err := s.SetReadiness(t.Context(), "ghost", core.NodeReady, ""); !errors.Is(err, core.ErrNodeNotFound) {
 		t.Fatalf("got %v, want ErrNodeNotFound", err)
 	}
 }
