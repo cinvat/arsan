@@ -7,43 +7,28 @@ import (
 )
 
 var createCmd = &cobra.Command{
-	Use:   "create (vm NAME | -f FILE)",
-	Short: "Create virtual machines, imperatively or from a file",
+	// A VM has too many parameters for flags (flavor, image, disks,
+	// networks): files only, like kubectl.
+	Use:   "create -f FILE",
+	Short: "Create virtual machines from a file",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		file, _ := cmd.Flags().GetString("filename")
+		if file == "" {
+			return fmt.Errorf("usage: create -f FILE")
+		}
 		c := NewClient(apiURL(cmd))
-		if file, _ := cmd.Flags().GetString("filename"); file != "" {
-			manifests, err := loadManifests(file)
-			if err != nil {
-				return err
-			}
-			for _, m := range manifests {
-				vm, err := c.CreateVirtualMachine(m.Metadata.Name, m.Spec.Image, m.Spec.Flavor)
-				if err != nil {
-					return fmt.Errorf("%s: %w", m.Metadata.Name, err)
-				}
-				// Accepted, not running: poll `arsanctl get vm` until ACTIVE.
-				fmt.Printf("virtualmachine/%s created (%s %s)\n", vm.Name, vm.ID, vm.State)
-			}
-			return nil
-		}
-		if len(args) != 2 || (args[0] != "vm" && args[0] != "virtualmachine") {
-			return fmt.Errorf("usage: create (vm NAME --image IMAGE | -f FILE)")
-		}
-		name := args[1]
-		image, _ := cmd.Flags().GetString("image")
-		vcpu, _ := cmd.Flags().GetInt("vcpu")
-		ram, _ := cmd.Flags().GetInt("ram")
-		disk, _ := cmd.Flags().GetInt("disk")
-		if image == "" {
-			return fmt.Errorf("--image is required: local qcow2 path or http(s) URL")
-		}
-		vm, err := c.CreateVirtualMachine(name, image, Flavor{
-			Name: "cli", VCPU: vcpu, RAM: ram, Disk: disk,
-		})
+		manifests, err := loadManifests(file)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("virtualmachine/%s created (%s %s)\n", vm.Name, vm.ID, vm.State)
+		for _, m := range manifests {
+			vm, err := c.CreateVirtualMachine(m.Metadata.Name, m.Spec.Image, m.Spec.Flavor)
+			if err != nil {
+				return fmt.Errorf("%s: %w", m.Metadata.Name, err)
+			}
+			// Accepted, not running: poll `arsanctl get vm` until ACTIVE.
+			fmt.Printf("virtualmachine/%s created (%s %s)\n", vm.Name, vm.ID, vm.State)
+		}
 		return nil
 	},
 }
@@ -131,11 +116,8 @@ var applyCmd = &cobra.Command{
 }
 
 func init() {
-	createCmd.Flags().String("image", "", "qcow2 path on the agent host, or http(s) URL to fetch")
-	createCmd.Flags().Int("vcpu", 1, "vCPUs")
-	createCmd.Flags().Int("ram", 2, "RAM in GiB")
-	createCmd.Flags().Int("disk", 10, "disk in GiB")
 	createCmd.Flags().StringP("filename", "f", "", "manifest file (--- separated)")
+	_ = createCmd.MarkFlagRequired("filename")
 	rootCmd.AddCommand(createCmd)
 
 	deleteCmd.Flags().StringP("filename", "f", "", "manifest file (--- separated)")
