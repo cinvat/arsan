@@ -47,7 +47,6 @@ func Register(r *gin.Engine, cfg Config) {
 	// that creates a node.
 	g.POST("/nodes", bootstrap.RegisterNode)
 	g.GET("/nodes", h.ListNodes)
-	g.GET("/nodes/watch", h.WatchNodes)
 	g.POST("/nodes/:id/usage", h.RecordUsage)
 
 	// VirtualMachines. CRUD only: create persists PENDING and publishes a command,

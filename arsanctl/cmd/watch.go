@@ -23,7 +23,7 @@ var watchCmd = &cobra.Command{
 // watchNodes streams the server's node snapshots: one JSON object per line,
 // each a full snapshot, until the server closes or the client is interrupted.
 func watchNodes(c *Client) error {
-	resp, err := c.http.Get(c.base + "/nodes/watch")
+	resp, err := c.http.Get(c.base + "/nodes?watch=true")
 	if err != nil {
 		return err
 	}

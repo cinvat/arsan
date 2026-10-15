@@ -27,6 +27,10 @@ func Health(c *gin.Context) {
 }
 
 func (h *Handler) ListNodes(c *gin.Context) {
+	if _, ok := c.GetQuery("watch"); ok {
+		h.WatchNodes(c)
+		return
+	}
 	nodes, err := h.nodes.List(c.Request.Context())
 	if err != nil {
 		writeErr(c, err)

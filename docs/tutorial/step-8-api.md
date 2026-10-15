@@ -1,7 +1,7 @@
 # Step 8: Controller REST API
 
 ## Goal
-Implement the GIN-based REST API for the control plane: `/virtualmachines`, `/nodes`, `/nodes/watch`, `/healthz`.
+Implement the GIN-based REST API for the control plane: `/virtualmachines`,  `/nodes` (`?watch=true` streams), `/healthz`.
 
 ---
 
