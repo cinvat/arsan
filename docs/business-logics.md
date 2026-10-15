@@ -390,7 +390,7 @@ this is worth more than a comment asking people not to.
 ### Request lifecycle
 
 ```
-POST /v1alpha1/servers
+POST /v1alpha1/virtualmachines
         │
         ▼
   api: validate → insert Instance(PENDING)      ← CRUD
@@ -411,7 +411,7 @@ POST /v1alpha1/servers
         └── Ack                                      ← retires the command
 ```
 
-The client polls `GET /servers/{id}`. It does not subscribe, and nothing about
+The client polls `GET /virtualmachines/{id}`. It does not subscribe, and nothing about
 the request depends on the api staying up.
 
 The `PENDING` row is not a decision. It records that a user asked for a VM;
@@ -419,7 +419,7 @@ where it runs is the controller's answer.
 
 ### Placement is read, never recomputed
 
-`GET /servers/{id}` returns what the scheduler wrote. The scheduler updates the
+`GET /virtualmachines/{id}` returns what the scheduler wrote. The scheduler updates the
 instance record with `Placement.Reason` and `RunnerUp` when it places, so "why
 this host?" is answerable from the record alone.
 
@@ -635,5 +635,5 @@ rediscovered:
 - **Does `api` still run loops in-process?** Once the postgres store is wired,
   no. Keeping both modes invites the memory-store trap above.
 - **Flavor persistence.** Flavors are currently passed inline on
-  `POST /servers`. A `flavors` table with named references would make them
+  `POST /virtualmachines`. A `flavors` table with named references would make them
   shareable and versionable; the API is already the right place for it.

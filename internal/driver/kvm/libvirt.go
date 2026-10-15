@@ -104,8 +104,13 @@ func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
 func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.InstanceInfo, error) {
 	info := core.InstanceInfo{ID: req.InstanceID, NodeID: req.NodeID, Driver: d.name}
 	if req.ImageRef == "" {
-		return core.InstanceInfo{}, fmt.Errorf("kvm: image_ref is required and must name a qcow2 file on the host: %w", core.ErrRequestRejected)
+		return core.InstanceInfo{}, fmt.Errorf("kvm: image_ref is required: %w", core.ErrRequestRejected)
 	}
+	disk, err := resolveImage(ctx, req.ImageRef)
+	if err != nil {
+		return core.InstanceInfo{}, err
+	}
+	req.ImageRef = disk
 	err := d.do(ctx, func() error {
 		dom, err := d.lookup(domainName(req.InstanceID))
 		if err != nil {

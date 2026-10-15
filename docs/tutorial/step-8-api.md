@@ -1,7 +1,7 @@
 # Step 8: Controller REST API
 
 ## Goal
-Implement the GIN-based REST API for the control plane: `/servers`, `/nodes`, `/healthz`.
+Implement the GIN-based REST API for the control plane: `/virtualmachines`, `/nodes`, `/nodes/watch`, `/healthz`.
 
 ---
 
@@ -67,12 +67,12 @@ func (s *Server) Handler() http.Handler {
 	r.POST("/nodes/:id/enable", s.enableNode)
 
 	// Servers
-	r.POST("/servers", s.createServer)
-	r.GET("/servers", s.listServers)
-	r.GET("/servers/:id", s.getServer)
-	r.DELETE("/servers/:id", s.deleteServer)
-	r.POST("/servers/:id/start", s.startServer)
-	r.POST("/servers/:id/stop", s.stopServer)
+	r.POST("/virtualmachines", s.createVirtualMachine)
+	r.GET("/virtualmachines", s.listVirtualMachines)
+	r.GET("/virtualmachines/:id", s.getVirtualMachine)
+	r.DELETE("/virtualmachines/:id", s.deleteVirtualMachine)
+	r.POST("/virtualmachines/:id/start", s.startVirtualMachine)
+	r.POST("/virtualmachines/:id/stop", s.stopVirtualMachine)
 
 	return r
 }
@@ -154,7 +154,7 @@ func (s *Server) createServer(c *gin.Context) {
 		Name: req.Name, ImageRef: req.ImageRef, Flavor: req.Flavor,
 	})
 	if err != nil { writeErr(c, err); return }
-	c.JSON(http.StatusAccepted, inst) // 202: async, poll GET /servers/:id
+	c.JSON(http.StatusAccepted, inst) // 202: async, poll GET /virtualmachines/:id
 }
 
 func (s *Server) listServers(c *gin.Context) {
@@ -326,12 +326,12 @@ go list -deps ./api/... | grep cinvat
 | POST | `/nodes/:id/usage` | Record reported node usage |
 | POST | `/nodes/:id/disable` | Disable node (evict) |
 | POST | `/nodes/:id/enable` | Re-enable node |
-| POST | `/servers` | Create VM (202 Accepted) |
-| GET | `/servers` | List VMs (filter by `?state=`) |
-| GET | `/servers/:id` | Get VM state |
-| DELETE | `/servers/:id` | Delete VM |
-| POST | `/servers/:id/start` | Start stopped VM |
-| POST | `/servers/:id/stop` | Stop running VM |
+| POST | `/virtualmachines` | Create VM (202 Accepted) |
+| GET | `/virtualmachines` | List VMs (filter by `?state=`) |
+| GET | `/virtualmachines/:id` | Get VM state |
+| DELETE | `/virtualmachines/:id` | Delete VM |
+| POST | `/virtualmachines/:id/start` | Start stopped VM |
+| POST | `/virtualmachines/:id/stop` | Stop running VM |
 
 ---
 
@@ -349,16 +349,16 @@ curl -sX POST localhost:8080/nodes/n-compute-1/usage \
   -d '{"usage":{"vcpu":2,"ram":4,"disk":20}}'
 
 # Create VM
-curl -sX POST localhost:8080/servers \
+curl -sX POST localhost:8080/virtualmachines \
   -H 'content-type: application/json' \
   -d '{"name":"web-1","image_ref":"cirros","flavor":{"name":"m1.small","vcpu":1,"ram":2,"disk":10}}'
 
 # Poll until ACTIVE
-curl -s localhost:8080/servers/i-abc123 | jq '{id,name,state,node_id,generation}'
+curl -s localhost:8080/virtualmachines/i-abc123 | jq '{id,name,state,node_id,generation}'
 
 # Stop/Start
-curl -sX POST localhost:8080/servers/i-abc123/stop
-curl -sX POST localhost:8080/servers/i-abc123/start
+curl -sX POST localhost:8080/virtualmachines/i-abc123/stop
+curl -sX POST localhost:8080/virtualmachines/i-abc123/start
 ```
 
 ---

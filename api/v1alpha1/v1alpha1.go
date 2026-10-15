@@ -47,14 +47,15 @@ func Register(r *gin.Engine, cfg Config) {
 	// that creates a node.
 	g.POST("/nodes", bootstrap.RegisterNode)
 	g.GET("/nodes", h.ListNodes)
+	g.GET("/nodes/watch", h.WatchNodes)
 	g.POST("/nodes/:id/usage", h.RecordUsage)
 
-	// Servers. CRUD only: create persists PENDING and publishes a command,
+	// VirtualMachines. CRUD only: create persists PENDING and publishes a command,
 	// and every state change afterwards is the controller's doing.
-	g.POST("/servers", h.CreateServer)
-	g.GET("/servers", h.ListServers)
-	g.GET("/servers/:id", h.GetServer)
-	g.DELETE("/servers/:id", h.DeleteServer)
-	g.POST("/servers/:id/start", h.StartServer)
-	g.POST("/servers/:id/stop", h.StopServer)
+	g.POST("/virtualmachines", h.CreateVirtualMachine)
+	g.GET("/virtualmachines", h.ListVirtualMachines)
+	g.GET("/virtualmachines/:id", h.GetVirtualMachine)
+	g.DELETE("/virtualmachines/:id", h.DeleteVirtualMachine)
+	g.POST("/virtualmachines/:id/start", h.StartVirtualMachine)
+	g.POST("/virtualmachines/:id/stop", h.StopVirtualMachine)
 }

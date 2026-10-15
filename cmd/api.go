@@ -52,6 +52,9 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
 
+		// Unencrypted HTTP/2. Watch streams (nodes/watch) ride one
+		// multiplexed connection instead of one TCP stream each, and no
+		// certificates are needed to get it.
 		srv := &http.Server{
 			Addr: viper.GetString("addr"),
 			Handler: api.Register(api.Config{
@@ -61,7 +64,9 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 				BootstrapToken: bootstrapToken(),
 			}),
 			ReadHeaderTimeout: 10 * time.Second,
+			Protocols:         &http.Protocols{},
 		}
+		srv.Protocols.SetUnencryptedHTTP2(true)
 
 		errCh := make(chan error, 1)
 		go func() {

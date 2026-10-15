@@ -7,7 +7,7 @@ One binary, three subcommands: `api`, `controller`, `agent`.
 ## Architecture
 
 ```
-POST /v1alpha1/servers → api writes PENDING → NATS → 200 ("queued")
+POST /v1alpha1/virtualmachines → api writes PENDING → NATS → 202 ("queued, not running")
 controller consumes → schedule (filter → weigh → claim) → NATS request → agent's engine → libvirt
 ```
 
@@ -35,7 +35,7 @@ go build -o arsan .
 ./arsan agent --driver=fake -t s3cret
 
 # Create a VM
-curl -X POST localhost:8080/v1alpha1/servers \
+curl -X POST localhost:8080/v1alpha1/virtualmachines \
   -H 'content-type: application/json' \
   -d '{"name":"vm1","image_ref":"cirros","flavor":{"name":"m1","vcpu":1,"ram":2,"disk":10}}'
 ```

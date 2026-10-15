@@ -33,7 +33,7 @@ curl -s localhost:8080/v1alpha1/nodes
 ## Sequence 2: a VM is created
 
 ```
-you ──POST /v1alpha1/servers──▶ api
+you ──POST /v1alpha1/virtualmachines──▶ api
 api: validate → write PENDING → publish instance.create → 202 ("queued", not running)
 controller: filter (READY+enabled → capacity → arch) → weigh → claim (atomic)
   → NATS create → agent's engine defines the domain
@@ -41,11 +41,11 @@ controller: filter (READY+enabled → capacity → arch) → weigh → claim (at
 ```
 
 ```sh
-curl -X POST localhost:8080/v1alpha1/servers \
+curl -X POST localhost:8080/v1alpha1/virtualmachines \
   -H 'content-type: application/json' \
-  -d '{"name":"vm1","image_ref":"cirros","flavor":{"name":"m1","vcpu":1,"ram":2,"disk":10}}'
+  -d '{"name":"vm1","image_ref":"https://example.com/base.qcow2","flavor":{"name":"m1","vcpu":1,"ram":2,"disk":10}}'
 
-curl -s localhost:8080/v1alpha1/servers
+curl -s localhost:8080/v1alpha1/virtualmachines
 ```
 
 If placement fails, the instance lands in ERROR and the claim is released. If a
@@ -77,5 +77,5 @@ go build -tags kvm ./...
 ./arsan agent --driver=kvm -t s3cret
 ```
 
-`image_ref` must name a qcow2 file already on the host. The engine reports its
+`image_ref` is a qcow2 path on the agent host, or an `http(s)` URL the agent downloads once into `/var/lib/arsan/images` and reuses. The engine reports its
 own capacity, so there are no `--node.vcpu`-style flags.

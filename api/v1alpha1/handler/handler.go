@@ -37,7 +37,7 @@ func (h *Handler) ListNodes(c *gin.Context) {
 
 // ----------------------------------------------------------------- servers
 
-func (h *Handler) CreateServer(c *gin.Context) {
+func (h *Handler) CreateVirtualMachine(c *gin.Context) {
 	var req core.CreateInstanceRequest
 	if !bind(c, &req) {
 		return
@@ -57,7 +57,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	c.JSON(http.StatusAccepted, inst)
 }
 
-func (h *Handler) ListServers(c *gin.Context) {
+func (h *Handler) ListVirtualMachines(c *gin.Context) {
 	insts, err := h.instances.List(c.Request.Context())
 	if err != nil {
 		writeErr(c, err)
@@ -75,7 +75,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 	c.JSON(http.StatusOK, insts)
 }
 
-func (h *Handler) GetServer(c *gin.Context) {
+func (h *Handler) GetVirtualMachine(c *gin.Context) {
 	inst, err := h.instances.Get(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		writeErr(c, err)
@@ -84,7 +84,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 	c.JSON(http.StatusOK, inst)
 }
 
-func (h *Handler) DeleteServer(c *gin.Context) {
+func (h *Handler) DeleteVirtualMachine(c *gin.Context) {
 	if err := h.instances.Delete(c.Request.Context(), c.Param("id")); err != nil {
 		writeErr(c, err)
 		return
@@ -92,7 +92,7 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-func (h *Handler) StartServer(c *gin.Context) {
+func (h *Handler) StartVirtualMachine(c *gin.Context) {
 	if err := h.instances.Start(c.Request.Context(), c.Param("id")); err != nil {
 		writeErr(c, err)
 		return
@@ -100,7 +100,7 @@ func (h *Handler) StartServer(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"status": "starting"})
 }
 
-func (h *Handler) StopServer(c *gin.Context) {
+func (h *Handler) StopVirtualMachine(c *gin.Context) {
 	if err := h.instances.Stop(c.Request.Context(), c.Param("id")); err != nil {
 		writeErr(c, err)
 		return
