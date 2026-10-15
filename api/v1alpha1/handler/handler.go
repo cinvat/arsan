@@ -16,11 +16,10 @@ import (
 type Handler struct {
 	instances core.InstanceService
 	nodes     core.NodeService
-	scheduler core.Scheduler
 }
 
-func New(instances core.InstanceService, nodes core.NodeService, scheduler core.Scheduler) *Handler {
-	return &Handler{instances: instances, nodes: nodes, scheduler: scheduler}
+func New(instances core.InstanceService, nodes core.NodeService) *Handler {
+	return &Handler{instances: instances, nodes: nodes}
 }
 
 func Health(c *gin.Context) {

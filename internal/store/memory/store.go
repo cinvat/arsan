@@ -149,6 +149,9 @@ func (s *Store) Register(ctx context.Context, n core.Node) (core.Node, error) {
 		return existing, nil
 	}
 	n.State = core.NodeNotReady
+	// A fresh node has proved nothing yet. Naming that, rather than leaving
+	// a bare NOTREADY, tells an operator it is waiting rather than broken.
+	n.NotReadyReason = "registered, awaiting first probe"
 	n.Available = n.Total
 	n.Instances = nil
 	s.nodes[n.ID] = n

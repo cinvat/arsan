@@ -178,6 +178,7 @@ func (s *Store) Register(ctx context.Context, n core.Node) (core.Node, error) {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		row := fromNode(n)
 		row.State = string(core.NodeNotReady)
+		row.NotReadyReason = "registered, awaiting first probe"
 		// A new node starts fully available; reservations subtract from here.
 		row.AvailableVCPU = n.Total.VCPU
 		row.AvailableRAM = n.Total.RAM

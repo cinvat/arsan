@@ -35,6 +35,11 @@ func (s *Nodes) Register(ctx context.Context, req core.RegisterNodeRequest) (cor
 	if req.Name == "" {
 		return core.Node{}, fmt.Errorf("name required: %w", core.ErrInvalidRequest)
 	}
+	// The controller has no engine to offer as a default, so a node that did
+	// not declare one cannot be placed on.
+	if req.Driver == "" {
+		return core.Node{}, fmt.Errorf("driver required: %w", core.ErrInvalidRequest)
+	}
 	return s.Store.Register(ctx, core.Node{
 		ID:      NodeID(req.Name),
 		Name:    req.Name,

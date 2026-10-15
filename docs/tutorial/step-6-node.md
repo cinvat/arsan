@@ -20,72 +20,43 @@ and has been removed.
 
 ---
 
-## File: `internal/node/service.go`
+## File: `internal/records/records.go` (node half)
+
+There is no node service. An earlier `internal/node` package held registration
+and a liveness loop, but nothing ever called the loop and the api needed only
+CRUD — so the package was deleted and the api's records layer owns the node
+record outright. The controller owns everything else, through the probe below.
 
 ```go
-package node
+package records
 
-import (
-	"context"
-	"fmt"
-	"strings"
-	"time"
-
-	"github.com/cinvat/arsan/internal/core"
-	"github.com/cinvat/arsan/internal/message"
-)
-
-type Logger interface {
-	Warn(msg string, kv ...any)
-	Info(msg string, kv ...any)
-	Error(msg string, kv ...any)
+// Nodes implements core.NodeService over a node store.
+type Nodes struct {
+	Store core.NodeStore
 }
 
-type Config struct {
-	Nodes core.NodeStore
-	Bus   *message.Bus
-	Log   Logger
-
-
-	Arch   string
-	Driver string
-}
-
-type Service struct {
-	cfg Config
-}
-
-func New(cfg Config) *Service {
-	if cfg.Arch == "" { cfg.Arch = "amd64" }
-	return &Service{cfg: cfg}
-}
-
-func (s *Service) Register(ctx context.Context, req core.RegisterNodeRequest) (core.Node, error) {
-	if strings.TrimSpace(req.Name) == "" {
+// Register upserts a node. Only the bootstrap endpoint reaches it, and that
+// endpoint authenticates before calling.
+func (s *Nodes) Register(ctx context.Context, req core.RegisterNodeRequest) (core.Node, error) {
+	if req.Name == "" {
 		return core.Node{}, fmt.Errorf("name required: %w", core.ErrInvalidRequest)
 	}
-	arch := req.Arch
-	if arch == "" { arch = s.cfg.Arch }
-	drv := req.Driver
-	if drv == "" { drv = s.cfg.Driver }
-	if req.Total.VCPU <= 0 || req.Total.RAM <= 0 || req.Total.Disk <= 0 {
-		return core.Node{}, fmt.Errorf("total capacity required: %w", core.ErrInvalidRequest)
-	}
-
-	n := core.Node{
-		ID:        slug(req.Name),
-		Name:      req.Name,
-		Arch:      arch,
-		Driver:    drv,
-		Address:   req.Address,
-		Total:     req.Total,
-		Enabled:   true,
-	}
-	node, err := s.cfg.Nodes.Register(ctx, n)
-	if err != nil { return core.Node{}, fmt.Errorf("register %s: %w", req.Name, err) }
-	s.cfg.Log.Info("node registered", "node", node.ID, "arch", node.Arch, "driver", node.Driver)
-	return node, nil
+	return s.Store.Register(ctx, core.Node{
+		ID:      NodeID(req.Name),
+		Name:    req.Name,
+		Arch:    req.Arch,
+		Driver:  req.Driver,
+		Address: req.Address,
+		Total:   req.Total,
+		Enabled: true,
+	})
 }
+
+// NodeID derives a node's stable ID from its name.
+//
+// "Compute Node 1" and "compute-node-1" must resolve to the same node, or one
+// host registers twice and its reservations are split across two records.
+func NodeID(name string) string { return "n-" + util.Slug(name) }
 
 // RecordUsage stores what the agent reports it is using. It deliberately does
 // NOT set readiness: the controller decides that by probing the agent over
@@ -192,12 +163,12 @@ detection and reaction separate for testability.
 The reason is recorded on the node, so an operator sees *why* rather than a bare
 NOTREADY.
 
-### Node Must Not Import Compute
-```go
-// Publish event; do NOT call compute directly
-s.cfg.Bus.Publish(message.Event{Topic: message.TopicNodeDown, Payload: n.ID})
-```
-Decoupling via event bus keeps `node` from importing `compute`.
+### Detection and Reaction Stay Separate
+
+A failed probe records NOTREADY and the reason; it does not itself rebuild
+anything. That separation is what keeps the probe testable — and re-placement
+on node failure is currently the missing feature (see step 5), not something
+the probe does inline.
 
 ### Usage Is Recorded, Availability Is Derived
 ```go
@@ -223,7 +194,8 @@ The node service only registers, records usage and drains — it does not decide
 readiness, so most readiness tests belong to the controller.
 
 ```go
-// internal/node/service_test.go
+// internal/records and internal/store/gormdb carry these; the node record
+// is owned by the api side, so its tests live there, not in a service.
 func TestRegisterLeavesNodeNotReady(t *testing.T) {
 	s := setup(t)
 	n, err := s.Register(context.Background(), core.RegisterNodeRequest{
@@ -296,7 +268,7 @@ func TestDriverResolvesAfterRestartWithEmptyRegistry(t *testing.T)
 ## Run Tests
 
 ```bash
-go test -race ./internal/node/...
+go test -race ./internal/records/... ./internal/store/...
 ```
 
 ---

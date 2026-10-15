@@ -33,13 +33,11 @@ internal/bus             command bus (NATS JetStream)
 internal/records         api-side CRUD layer; decides nothing
 pkg/util                 shared helpers with no domain opinions
 internal/scheduler       filters, weighers, claim
-internal/compute         instance lifecycle state machine
-internal/node            registration, heartbeats, capacity
+internal/compute         instance lifecycle state machine (build/stop/start/delete/migrate/sweep)
 internal/store/memory    in-memory store (CAS transitions)
 internal/store/gormdb    durable store (GORM; postgres or sqlite)
 internal/driver          core.Driver registry + fake/kvm/remote
 internal/agent           gRPC agent server + client
-internal/message         in-process event bus
 ```
 
 ## Key Principles

@@ -18,15 +18,12 @@ import (
 	"time"
 
 	"github.com/cinvat/arsan/internal/core"
-	"github.com/cinvat/arsan/internal/message"
 )
 
 const (
-	MaxRebuildAttempts   = 10
 	DriverOperationTimeout = 5 * time.Minute
 	DefaultSweepInterval   = 30 * time.Second
 	DefaultStaleAfter      = 2 * time.Minute
-	DefaultMaxRebuildBackoff = 5 * time.Minute
 )
 
 type DriverFor func(nodeID string) (core.Driver, error)
@@ -34,14 +31,12 @@ type DriverFor func(nodeID string) (core.Driver, error)
 type Config struct {
 	Instances core.InstanceStore
 	Nodes     core.NodeStore
-	Bus       *message.Bus
 	Scheduler core.Scheduler
 	DriverFor DriverFor
 
 	DriverOperationTimeout time.Duration
 	SweepInterval          time.Duration
 	StaleAfter             time.Duration
-	MaxRebuildBackoff      time.Duration
 
 	Log Logger
 }
@@ -54,33 +49,22 @@ type Logger interface {
 
 type Service struct {
 	cfg Config
-	mu  sync.Mutex
 }
 
 func New(cfg Config) *Service {
 	if cfg.DriverOperationTimeout == 0 { cfg.DriverOperationTimeout = DriverOperationTimeout }
 	if cfg.SweepInterval == 0 { cfg.SweepInterval = DefaultSweepInterval }
 	if cfg.StaleAfter == 0 { cfg.StaleAfter = DefaultStaleAfter }
-	if cfg.MaxRebuildBackoff == 0 { cfg.MaxRebuildBackoff = DefaultMaxRebuildBackoff }
 	return &Service{cfg: cfg}
 }
 
 // ========== Public API ==========
-
-func (s *Service) Create(ctx context.Context, req core.CreateInstanceRequest) (core.Instance, error) {
-	inst := core.Instance{
-		ID:        newID(),
-		Name:      req.Name,
-		Flavor:    req.Flavor,
-		ImageRef:  req.ImageRef,
-		State:     core.StatePending,
-		CreatedAt: time.Now().UTC(),
-	}
-	created, err := s.cfg.Instances.Create(ctx, inst)
-	if err != nil { return core.Instance{}, fmt.Errorf("create instance: %w", err) }
-	s.cfg.Bus.Publish(message.Event{Topic: message.TopicInstanceCreated, Payload: created.ID})
-	return created, nil
-}
+//
+// There is deliberately no Create here. The api persists the PENDING row
+// through the records layer (which mints the id and enqueues over NATS); a
+// second Create on this service would mint a second id scheme and publish to
+// a bus nobody subscribes to. This service builds, stops, starts, deletes and
+// migrates — it does not originate instances.
 
 func (s *Service) Get(ctx context.Context, id string) (core.Instance, error) {
 	return s.cfg.Instances.Get(ctx, id)
@@ -225,63 +209,24 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		if err := s.cfg.Instances.ReleaseReservations(ctx, i.ID, i.NodeID); err != nil {
 			s.cfg.Log.Error("sweep release", "instance", i.ID, "err", err)
 		}
-		s.cfg.Bus.Publish(message.Event{Topic: message.TopicInstanceCreated, Payload: i.ID})
+		// Re-drive the build here rather than publishing: the retry path owns
+		// everything Build needs.
+		if err := s.build(ctx, i.ID); err != nil {
+			s.cfg.Log.Warn("sweep rebuild", "instance", i.ID, "err", err)
+		}
 	}
 	return nil
 }
 
 // ========== Re-placement on Node Failure ==========
+//
+// There is deliberately no HandleNodeDown. An earlier version had one, but it
+// never ran (nothing published its trigger) and its body was broken: it
+// discarded the schedule result, leaking the fresh claim, and stranded the
+// instance PENDING. Host-failure recovery needs a real design — probably the
+// probe firing it, with generation-aware placement — not a resurrection of
+// that function.
 
-func (s *Service) HandleNodeDown(ctx context.Context, failedNodeID string) error {
-	all, err := s.cfg.Instances.List(ctx)
-	if err != nil { return fmt.Errorf("list instances: %w", err) }
-
-	for _, inst := range all {
-		if inst.NodeID != failedNodeID { continue }
-		if inst.State == core.StateShutoff || inst.State == core.StateError { continue }
-		if err := s.rebuild(ctx, inst, failedNodeID); err != nil {
-			s.cfg.Log.Error("rebuild", "instance", inst.ID, "err", err)
-		}
-	}
-	return nil
-}
-
-func (s *Service) rebuild(ctx context.Context, inst core.Instance, failedNodeID string) error {
-	// Per-instance backoff: prevents thundering herd when a whole host dies
-	if wait := backoff(inst.Generation); wait > 0 {
-		select {
-		case <-ctx.Done(): return ctx.Err()
-		case <-time.After(wait):
-		}
-	}
-
-	// 1. Release old reservation
-	if err := s.cfg.Instances.ReleaseReservations(ctx, inst.ID, failedNodeID); err != nil {
-		return fmt.Errorf("release: %w", err)
-	}
-
-	// 2. Reset to PENDING with bumped generation
-	if _, err := s.cfg.Instances.Transition(ctx, inst.ID, inst.State, core.StatePending); err != nil {
-		return fmt.Errorf("reset to pending: %w", err)
-	}
-
-	// 3. Schedule with exclusion and bumped generation
-	_, err := s.cfg.Scheduler.Schedule(ctx, core.PlacementRequest{
-		InstanceID:     inst.ID,
-		Flavor:         inst.Flavor,
-		ImageRef:       inst.ImageRef,
-		ExcludeNodeIDs: []string{failedNodeID}, // CRITICAL: don't place back on failed node
-		Generation:     inst.Generation + 1,
-	})
-	return err
-}
-
-func backoff(generation int) time.Duration {
-	d := time.Duration(1<<min(generation, 8)) * time.Second
-	return min(d, 5*time.Minute)
-}
-
-func newID() string { return fmt.Sprintf("i-%d", time.Now().UnixNano()) }
 ```
 
 ---
@@ -344,91 +289,82 @@ import (
 
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/internal/driver/fake"
-	"github.com/cinvat/arsan/internal/message"
 	"github.com/cinvat/arsan/internal/scheduler"
 	"github.com/cinvat/arsan/internal/store/memory"
 )
 
-func setup(t *testing.T) *Service {
+func setup(t *testing.T) (*Service, *memory.Store) {
 	st := memory.New()
-	bus := message.New()
-	d := fake.New()
-	driverFor := func(string) (core.Driver, error) { return d, nil }
-
+	ctx := context.Background()
+	if _, err := st.Register(ctx, core.Node{
+		ID: "n-1", Name: "compute-1", Enabled: true,
+		Total: core.Resources{VCPU: 8, RAM: 16, Disk: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The probe owns readiness; the test stands in for it.
+	if _, err := st.SetReadiness(ctx, "n-1", core.NodeReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	// One shared engine: a fresh stateful fake per call would forget the
+	// instances the previous call created.
+	engine := fake.New()
+	driverFor := func(string) (core.Driver, error) { return engine, nil }
 	sched := scheduler.New(scheduler.Config{
-		Instances: st, Nodes: st, DriverFor: driverFor, MaxAttempts: 1,
+		Instances: st, Nodes: st, DriverFor: driverFor, Log: quiet{},
 	})
-
-	return New(Config{
-		Instances: st, Nodes: st, Bus: bus, Scheduler: sched,
-		DriverFor: driverFor, SweepInterval: 10 * time.Millisecond,
-		StaleAfter: 20 * time.Millisecond, Log: testLog{t},
+	svc := New(Config{
+		Instances: st, Nodes: st, Scheduler: sched,
+		DriverFor: driverFor, Log: quiet{},
 	})
+	return svc, st
 }
 
-func TestCreateReachesActive(t *testing.T) {
-	s := setup(t)
-	inst, err := s.Create(context.Background(), core.CreateInstanceRequest{
-		Name: "test", ImageRef: "cirros", Flavor: core.Flavor{VCPU: 1, RAM: 2, Disk: 10},
+func TestBuildLifecycle(t *testing.T) {
+	svc, st := setup(t)
+	inst, err := st.Create(context.Background(), core.Instance{
+		ID: "i-1", Name: "vm1",
+		Flavor:   core.Flavor{Name: "m1", VCPU: 1, RAM: 2, Disk: 10},
+		ImageRef: "cirros", State: core.StatePending,
 	})
-	if err != nil { t.Fatal(err) }
-
-	// Wait for ACTIVE
-	for i := 0; i < 50; i++ {
-		inst, _ = s.Get(context.Background(), inst.ID)
-		if inst.State == core.StateActive { return }
-		time.Sleep(10 * time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Fatalf("instance stuck at %s", inst.State)
+	if err := svc.Build(context.Background(), inst); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	got, _ := st.Get(context.Background(), "i-1")
+	if got.State != core.StateActive { t.Fatalf("state = %s, want ACTIVE", got.State) }
 }
 
-func TestTransitionsRejectIllegal(t *testing.T) {
-	s := setup(t)
-	inst, _ := s.Create(context.Background(), core.CreateInstanceRequest{
-		Name: "test", ImageRef: "cirros", Flavor: core.Flavor{VCPU: 1, RAM: 2, Disk: 10},
-	})
-	// Wait for ACTIVE
-	for inst.State != core.StateActive {
-		inst, _ = s.Get(context.Background(), inst.ID)
-		time.Sleep(10 * time.Millisecond)
+func TestDeleteReleasesCapacity(t *testing.T) {
+	svc, st := setup(t)
+	// ... build i-1 as above, then:
+	if err := svc.Delete(context.Background(), "i-1"); err != nil { t.Fatal(err) }
+	n, _ := st.GetNode(context.Background(), "n-1")
+	if n.Available != n.Total {
+		t.Fatalf("available = %+v, want the claim returned", n.Available)
 	}
-
-	// Active -> Building must fail
-	err := s.Stop(context.Background(), inst.ID)
-	if err == nil { t.Fatal("stop should succeed") }
-
-	err = s.Start(context.Background(), inst.ID)
-	if err == nil { t.Fatal("start from active should fail") }
 }
 
-func TestReplacedOnNodeDown(t *testing.T) {
-	s := setup(t)
-	// Two nodes, n1 has capacity, n2 doesn't
-	st := s.cfg.Instances.(*memory.Store)
-	st.nodes["n1"] = core.Node{ID: "n1", State: core.NodeReady, Enabled: true, Total: core.Resources{VCPU: 8, RAM: 16, Disk: 100}, Available: core.Resources{VCPU: 8, RAM: 16, Disk: 100}}
-	st.nodes["n2"] = core.Node{ID: "n2", State: core.NodeReady, Enabled: true, Total: core.Resources{VCPU: 1, RAM: 2, Disk: 10}, Available: core.Resources{VCPU: 1, RAM: 2, Disk: 10}}
-
-	inst, _ := s.Create(context.Background(), core.CreateInstanceRequest{
-		Name: "test", ImageRef: "cirros", Flavor: core.Flavor{VCPU: 1, RAM: 2, Disk: 10},
-	})
-	// Wait ACTIVE on n1
-	for inst.State != core.StateActive {
-		inst, _ = s.Get(context.Background(), inst.ID)
-		time.Sleep(10 * time.Millisecond)
+func TestStopStart(t *testing.T) {
+	svc, st := setup(t)
+	// ... build i-1 to ACTIVE as above, then:
+	if err := svc.Stop(context.Background(), "i-1"); err != nil { t.Fatal(err) }
+	if got, _ := st.Get(context.Background(), "i-1"); got.State != core.StateShutoff {
+		t.Fatalf("state = %s, want SHUTOFF", got.State)
 	}
-	if inst.NodeID != "n1" { t.Fatalf("expected n1, got %s", inst.NodeID) }
-
-	// Mark n1 down
-	s.HandleNodeDown(context.Background(), "n1")
-
-	// Should re-place on n2
-	for i := 0; i < 50; i++ {
-		inst, _ = s.Get(context.Background(), inst.ID)
-		if inst.NodeID == "n2" && inst.State == core.StateActive { return }
-		time.Sleep(10 * time.Millisecond)
+	// Starting boots the VM where it already lives; it must not reschedule.
+	if err := svc.Start(context.Background(), "i-1"); err != nil { t.Fatal(err) }
+	if got, _ := st.Get(context.Background(), "i-1"); got.State != core.StateActive {
+		t.Fatalf("state = %s, want ACTIVE", got.State)
 	}
-	t.Fatalf("instance not re-placed: %+v", inst)
 }
+
+// There is no TestReplacedOnNodeDown. Host-failure recovery was removed with
+// HandleNodeDown: it never ran and its body was broken (it discarded the
+// schedule result, leaking the fresh claim). When it comes back — probably
+// fired by the probe, generation-aware — this is where its test goes.
 ```
 
 ---

@@ -32,7 +32,6 @@ func (nopLogger) Error(string, ...any) {}
 type Config struct {
 	Instances core.InstanceService
 	Nodes     core.NodeService
-	Scheduler core.Scheduler
 	Bus       bus.Bus
 	// BootstrapToken is the shared secret an agent presents to register.
 	BootstrapToken string
@@ -47,7 +46,6 @@ func Register(cfg Config) *gin.Engine {
 	v1alpha1.Register(r, v1alpha1.Config{
 		Instances:      cfg.Instances,
 		Nodes:          cfg.Nodes,
-		Scheduler:      cfg.Scheduler,
 		Bus:            cfg.Bus,
 		BootstrapToken: cfg.BootstrapToken,
 	})

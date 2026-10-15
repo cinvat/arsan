@@ -18,21 +18,18 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cinvat/arsan/internal/compute"
+	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/core"
-	"github.com/cinvat/arsan/internal/message"
-	"github.com/cinvat/arsan/internal/node"
-	"github.com/cinvat/arsan/internal/scheduler"
 	"github.com/gin-gonic/gin"
 )
 
 type Config struct {
 	Instances core.InstanceService
 	Nodes     core.NodeService
-	Scheduler core.Scheduler
-	Bus       *message.Bus
-	Log       Logger
-	RequestTimeout time.Duration
+	Bus       bus.Bus
+	// BootstrapToken is the shared secret an agent presents to register.
+	BootstrapToken string
+	Log            Logger
 }
 
 type Logger interface {
@@ -256,8 +253,6 @@ import (
 	"github.com/cinvat/arsan/internal/api"
 	"github.com/cinvat/arsan/internal/compute"
 	"github.com/cinvat/arsan/internal/core"
-	"github.com/cinvat/arsan/internal/message"
-	"github.com/cinvat/arsan/internal/node"
 	"github.com/cinvat/arsan/internal/scheduler"
 	"github.com/cinvat/arsan/internal/store/memory"
 	"github.com/spf13/cobra"

@@ -13,25 +13,24 @@ package integration
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/cinvat/arsan/internal/api"
 	"github.com/cinvat/arsan/internal/compute"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/internal/driver/fake"
-	"github.com/cinvat/arsan/internal/message"
-	"github.com/cinvat/arsan/internal/node"
 	"github.com/cinvat/arsan/internal/scheduler"
 	"github.com/cinvat/arsan/internal/store/memory"
 )
 
+// The harness wires the controller's half directly: one store, one scheduler,
+// one compute service, one shared fake engine. HTTP-level coverage lives in
+// test/bootstrap and test/bootstrap_flow, which run the real api against a
+// real NATS server; this file covers the build lifecycle underneath them.
 type harness struct {
-	server *httptest.Server
 	store  *memory.Store
 	comp   *compute.Service
-	node   *node.Service
+	engine *fake.Driver
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -39,95 +38,89 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	ctx, cancel := context.WithCancel(context.Background())
 	st := memory.New()
-	bus := message.New()
-	d := fake.New()
-	driverFor := func(string) (core.Driver, error) { return d, nil }
+	// One shared engine: a fresh stateful fake per call would forget the
+	// instances the previous call created.
+	engine := fake.New()
+	driverFor := func(string) (core.Driver, error) { return engine, nil }
 
 	sched := scheduler.New(scheduler.Config{
 		Instances: st, Nodes: st, DriverFor: driverFor, MaxAttempts: 5, Log: tLog{t},
 	})
 
 	compSvc := compute.New(compute.Config{
-		Instances: st, Nodes: st, Bus: bus, Scheduler: sched,
+		Instances: st, Nodes: st, Scheduler: sched,
 		DriverFor: driverFor, SweepInterval: 50 * time.Millisecond,
-		StaleAfter: 100 * time.Millisecond, MaxRebuildBackoff: time.Millisecond,
+		StaleAfter: 100 * time.Millisecond,
 		Log: tLog{t},
 	})
 
-	nodeSvc := node.New(node.Config{
-		Nodes: st, Bus: bus, Log: tLog{t},
-	})
+	t.Cleanup(func() { cancel() })
 
-	// Background loops
-	go func() { _ = nodeSvc.Watch(ctx) }()
-	go func() { _ = compSvc.SweepLoop(ctx) }()
-
-	srv := httptest.NewServer(api.New(api.Config{
-		Instances: compSvc, Nodes: nodeSvc, Scheduler: sched, Bus: bus, Log: tLog{t},
-	}).Handler())
-
-	t.Cleanup(func() { cancel(); srv.Close() })
-
-	return &harness{server: srv, store: st, comp: compSvc, node: nodeSvc, ctx: ctx, cancel: cancel}
+	return &harness{store: st, comp: compSvc, engine: engine, ctx: ctx, cancel: cancel}
 }
 
-func (h *harness) registerNode(name string, vcpu, ram, disk int) core.Node {
-	req := map[string]any{
-		"name": name, "arch": "amd64", "driver": "fake",
-		"total": map[string]int{"vcpu": vcpu, "ram": ram, "disk": disk},
+// Nodes register directly against the store here; the HTTP bootstrap path is
+// covered in test/bootstrap. Readiness is set the way the probe would set it.
+func (h *harness) registerNode(t *testing.T, name string, vcpu, ram, disk int) core.Node {
+	t.Helper()
+	n, err := h.store.Register(h.ctx, core.Node{
+		ID: "n-" + name, Name: name, Enabled: true,
+		Total: core.Resources{VCPU: vcpu, RAM: ram, Disk: disk},
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	var n core.Node
-	h.postJSON("/nodes", req, &n)
+	if _, err := h.store.SetReadiness(h.ctx, n.ID, core.NodeReady, ""); err != nil {
+		t.Fatal(err)
+	}
 	return n
 }
 
-func (h *harness) reportUsage(nodeID string, usage map[string]int) {
-	h.postJSON("/nodes/"+nodeID+"/usage", map[string]any{"usage": usage}, nil)
-}
-
-func (h *harness) createServer(name string, vcpu, ram, disk int) core.Instance {
-	req := map[string]any{
-		"name": name, "image_ref": "cirros",
-		"flavor": map[string]int{"name": "m1.small", "vcpu": vcpu, "ram": ram, "disk": disk},
+// writePending writes the PENDING row; build drives it. createServer expects
+// success, the ExpectError/try variants tolerate failure for the error-path
+// and concurrency tests.
+func (h *harness) writePending(t *testing.T, name string, vcpu, ram, disk int) core.Instance {
+	t.Helper()
+	inst, err := h.store.Create(h.ctx, core.Instance{
+		ID: "i-" + name, Name: name,
+		Flavor:   core.Flavor{Name: "m1", VCPU: vcpu, RAM: ram, Disk: disk},
+		ImageRef: "cirros", State: core.StatePending,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	var inst core.Instance
-	h.postJSON("/servers", req, &inst)
 	return inst
 }
 
-func (h *harness) getServer(id string) core.Instance {
-	var inst core.Instance
-	h.getJSON("/servers/"+id, &inst)
+func (h *harness) createServer(t *testing.T, name string, vcpu, ram, disk int) core.Instance {
+	t.Helper()
+	inst := h.writePending(t, name, vcpu, ram, disk)
+	if err := h.comp.Build(h.ctx, inst); err != nil {
+		t.Fatal(err)
+	}
 	return inst
 }
 
-func (h *harness) waitState(id string, want core.InstanceState) core.Instance {
-	for i := 0; i < 50; i++ {
-		inst := h.getServer(id)
-		if inst.State == want { return inst }
-		time.Sleep(20 * time.Millisecond)
+func (h *harness) createServerExpectError(t *testing.T, name string, vcpu, ram, disk int) core.Instance {
+	t.Helper()
+	inst := h.writePending(t, name, vcpu, ram, disk)
+	_ = h.comp.Build(h.ctx, inst)
+	return inst
+}
+
+func (h *harness) tryCreateServer(name string, vcpu, ram, disk int) (core.Instance, error) {
+	inst, err := h.store.Create(h.ctx, core.Instance{
+		ID: "i-" + name, Name: name,
+		Flavor:   core.Flavor{Name: "m1", VCPU: vcpu, RAM: ram, Disk: disk},
+		ImageRef: "cirros", State: core.StatePending,
+	})
+	if err != nil {
+		return core.Instance{}, err
 	}
-	return h.getServer(id)
-}
-
-func (h *harness) postJSON(path string, body, out any) {
-	reqBody, _ := json.Marshal(body)
-	req, _ := http.NewRequestWithContext(h.ctx, "POST", h.server.URL+path, bytes.NewReader(reqBody))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { panic(err) }
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 { panic(fmt.Sprintf("POST %s: %d", path, resp.StatusCode)) }
-	if out != nil { json.NewDecoder(resp.Body).Decode(out) }
-}
-
-func (h *harness) getJSON(path string, out any) {
-	req, _ := http.NewRequestWithContext(h.ctx, "GET", h.server.URL+path, nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil { panic(err) }
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 { panic(fmt.Sprintf("GET %s: %d", path, resp.StatusCode)) }
-	json.NewDecoder(resp.Body).Decode(out)
+	if err := h.comp.Build(h.ctx, inst); err != nil {
+		return inst, err
+	}
+	return inst, nil
 }
 
 // tLog routes service logs into t.Logf
@@ -144,15 +137,15 @@ func (l tLog) Error(msg string, kv ...any) { l.t.Logf("ERROR %s %v", msg, kv) }
 ```go
 func TestCreateReachesActive(t *testing.T) {
 	h := newHarness(t)
-	h.registerNode("compute-1", 8, 16, 100)
-	h.reportUsage("n-compute-1", map[string]int{"vcpu": 0, "ram": 0, "disk": 0})
+	h.registerNode(t, "compute-1", 8, 16, 100)
 
-	inst := h.createServer("web-1", 1, 2, 10)
-	if inst.State != core.StatePending { t.Fatalf("want PENDING, got %s", inst.State) }
-
-	inst = h.waitState(inst.ID, core.StateActive)
-	if inst.State != core.StateActive { t.Fatalf("stuck at %s", inst.State) }
-	if inst.NodeID == "" { t.Fatal("no node_id assigned") }
+	inst := h.createServer(t, "web-1", 1, 2, 10)
+	got, err := h.store.Get(h.ctx, inst.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != core.StateActive { t.Fatalf("stuck at %s", got.State) }
+	if got.NodeID == "" { t.Fatal("no node_id assigned") }
 }
 ```
 
@@ -160,51 +153,34 @@ func TestCreateReachesActive(t *testing.T) {
 
 ## Test: Node Failure → Re-placement
 
-```go
-func TestInstanceReplacedOnNodeDown(t *testing.T) {
-	h := newHarness(t)
-	n1 := h.registerNode("compute-1", 8, 16, 100)
-	n2 := h.registerNode("compute-2", 8, 16, 100)
-	h.reportUsage(n1.ID, map[string]int{})
-	h.reportUsage(n2.ID, map[string]int{})
-
-	inst := h.createServer("web-1", 1, 2, 10)
-	inst = h.waitState(inst.ID, core.StateActive)
-	if inst.NodeID != n1.ID { t.Fatalf("expected %s, got %s", n1.ID, inst.NodeID) }
-
-	// Take n1 out of service the way a failed probe would.
-	h.store.SetReadiness(t.ctx, n1.ID, core.NodeNotReady, "probe failed: connection refused")
-	h.comp.HandleNodeDown(t.ctx, n1.ID)
-
-	// Should re-place on n2
-	inst = h.waitState(inst.ID, core.StateActive)
-	if inst.NodeID != n2.ID { t.Fatalf("re-placed on %s, want %s", inst.NodeID, n2.ID) }
-	if inst.Generation != 1 { t.Fatalf("generation %d, want 1", inst.Generation) }
-}
-```
+There is no such test. Host-failure recovery was removed with HandleNodeDown:
+it never ran and its body was broken. When it comes back — probably fired by
+the probe, generation-aware — this is where its test goes: build on n1, fail
+the probe, assert the instance comes back ACTIVE on n2 with a bumped
+generation.
 
 ---
 
 ## Test: Drain Moves Instances
 
 ```go
-func TestDrainMovesInstancesOff(t *testing.T) {
+func TestDrainExcludesNodeFromPlacement(t *testing.T) {
 	h := newHarness(t)
-	n1 := h.registerNode("compute-1", 8, 16, 100)
-	n2 := h.registerNode("compute-2", 8, 16, 100)
-	h.reportUsage(n1.ID, map[string]int{})
-	h.reportUsage(n2.ID, map[string]int{})
+	n1 := h.registerNode(t, "compute-1", 8, 16, 100)
+	h.registerNode(t, "compute-2", 8, 16, 100)
 
-	inst := h.createServer("web-1", 1, 2, 10)
-	h.waitState(inst.ID, core.StateActive)
+	// Drain n1: new builds must land on n2. Draining moves nothing by
+	// itself — evacuation is the missing re-placement feature above.
+	if _, err := h.store.SetNodeEnabled(h.ctx, n1.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.SetReadiness(h.ctx, n1.ID, core.NodeNotReady, "disabled by operator"); err != nil {
+		t.Fatal(err)
+	}
 
-	// Disable n1 (drains)
-	h.node.Disable(t.ctx, n1.ID)
-	h.node.Disable(t.ctx, n2.ID) // also disable n2 to force eviction
-
-	// Instance should move to n2
-	inst = h.waitState(inst.ID, core.StateActive)
-	if inst.NodeID != n2.ID { t.Fatalf("expected %s, got %s", n2.ID, inst.NodeID) }
+	inst := h.createServer(t, "web-1", 1, 2, 10)
+	got, _ := h.store.Get(h.ctx, inst.ID)
+	if got.NodeID == n1.ID { t.Fatalf("placed on drained %s", n1.ID) }
 }
 ```
 
@@ -215,28 +191,23 @@ func TestDrainMovesInstancesOff(t *testing.T) {
 ```go
 func TestDriverFailureReleasesReservation(t *testing.T) {
 	h := newHarness(t)
-	h.registerNode("compute-1", 2, 4, 20) // Only fits 2 x 1vcpu
-	h.reportUsage("n-compute-1", map[string]int{})
+	h.registerNode(t, "compute-1", 2, 4, 20) // Only fits 2 x 1vcpu
 
-	// Make driver fail on 3rd Create
-	d := h.comp.DriverFor.(*fake.Driver)
-	d.FailNext("Create", errors.New("disk full"))
+	// A failed Create must land the instance in ERROR *and* give the claim
+	// back: fail() releases the reservation it just took.
+	//
+	// FailNext is the fake engine's test hook: the next Create fails, so the
+	// build exercises the error path. Reach it through the shared engine the
+	// harness built, not a fresh one.
+	h.engine.FailNext("Create", errors.New("disk full"))
 
-	// 3 concurrent creates, only 2 should succeed
-	results := make(chan core.Instance, 3)
-	for i := 0; i < 3; i++ {
-		go func(i int) {
-			inst := h.createServer(fmt.Sprintf("web-%d", i), 1, 2, 10)
-			results <- inst
-		}(i)
+	inst := h.createServerExpectError(t, "web-1", 1, 2, 10)
+	got, _ := h.store.Get(h.ctx, inst.ID)
+	if got.State != core.StateError { t.Fatalf("state = %s, want ERROR", got.State) }
+	n, _ := h.store.GetNode(h.ctx, "n-compute-1")
+	if n.Available != n.Total {
+		t.Fatalf("available = %+v, want the claim returned", n.Available)
 	}
-
-	var active int
-	for i := 0; i < 3; i++ {
-		inst := <-results
-		if inst.State == core.StateActive { active++ }
-	}
-	if active != 2 { t.Fatalf("expected 2 ACTIVE, got %d", active) }
 }
 ```
 
@@ -247,59 +218,67 @@ func TestDriverFailureReleasesReservation(t *testing.T) {
 ```go
 func TestConcurrentCreatesRespectCapacity(t *testing.T) {
 	h := newHarness(t)
-	h.registerNode("compute-1", 2, 4, 20) // Exactly 2 x 1vcpu
-	h.reportUsage("n-compute-1", map[string]int{})
+	h.registerNode(t, "compute-1", 2, 4, 20) // Exactly 2 x 1vcpu
 
+	// Ten builds race for room for two. The losers fail at the atomic claim,
+	// so exactly two come out ACTIVE and the rest ERROR with nothing held.
 	var wg sync.WaitGroup
-	var active int32
+	var active atomic.Int32
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			inst := h.createServer(fmt.Sprintf("web-%d", i), 1, 2, 10)
-			inst = h.waitState(inst.ID, core.StateActive)
-			if inst.State == core.StateActive { atomic.AddInt32(&active, 1) }
-		}()
+			inst, err := h.tryCreateServer(fmt.Sprintf("web-%d", i), 1, 2, 10)
+			if err != nil {
+				return
+			}
+			if got, _ := h.store.Get(h.ctx, inst.ID); got.State == core.StateActive {
+				active.Add(1)
+			}
+		}(i)
 	}
 	wg.Wait()
 
-	if active != 2 { t.Fatalf("expected exactly 2 ACTIVE, got %d", active) }
+	if active.Load() != 2 { t.Fatalf("expected exactly 2 ACTIVE, got %d", active.Load()) }
+	n, _ := h.store.GetNode(h.ctx, "n-compute-1")
+	if n.Available.VCPU != 0 {
+		t.Fatalf("available = %+v, want exactly exhausted", n.Available)
+	}
 }
 ```
 
 ---
 
-## Test: Re-placement After Transient Failure
+## Test: Sweep Retries a Stranded Build
 
 ```go
-func TestReplacedAfterTransientReplacementFailure(t *testing.T) {
+func TestSweepRebuildsStranded(t *testing.T) {
 	h := newHarness(t)
-	n1 := h.registerNode("compute-1", 8, 16, 100)
-	n2 := h.registerNode("compute-2", 8, 16, 100)
-	h.reportUsage(n1.ID, map[string]int{})
-	h.reportUsage(n2.ID, map[string]int{})
+	h.registerNode(t, "compute-1", 8, 16, 100)
 
-	inst := h.createServer("web", 1, 2, 10)
-	h.waitState(inst.ID, core.StateActive)
-
-	// Both hosts down: first re-placement cannot succeed
-	h.store.SetReadiness(t.ctx, n1.ID, core.NodeNotReady, "probe failed")
-	h.store.SetReadiness(t.ctx, n2.ID, core.NodeNotReady, "probe failed")
-	h.comp.HandleNodeDown(t.ctx, n1.ID)
-
-	// Instance should be PENDING with bumped generation
-	inst = h.waitState(inst.ID, core.StatePending)
-	if inst.Generation == 0 { t.Fatal("failed re-placement must bump generation") }
-
-	// n2 recovers, and a passing probe is what makes it schedulable again
-	h.store.SetReadiness(t.ctx, n2.ID, core.NodeReady, "")
-	h.reportUsage(n2.ID, map[string]int{})
-
-	// Sweep should finish the job
-	inst = h.waitState(inst.ID, core.StateActive)
-	if inst.NodeID != n2.ID { t.Fatalf("expected %s, got %s", n2.ID, inst.NodeID) }
+	// A Scheduling row older than StaleAfter is a build that died mid-flight:
+	// the sweep resets it to PENDING and re-drives the build itself.
+	inst, err := h.store.Create(h.ctx, core.Instance{
+		ID: "i-stranded", Name: "stranded",
+		Flavor: core.Flavor{Name: "m1", VCPU: 1, RAM: 2, Disk: 10},
+		ImageRef: "cirros", State: core.StatePending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.Transition(h.ctx, inst.ID, core.StatePending, core.StateScheduling); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.comp.Reconcile(h.ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := h.store.Get(h.ctx, inst.ID)
+	if got.State != core.StateActive { t.Fatalf("state = %s, want ACTIVE", got.State) }
 }
 ```
+
+A failed re-placement must leave the instance PENDING with a bumped generation
+— that invariant belongs to the re-placement feature above, when it lands.
 
 ---
 

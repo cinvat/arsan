@@ -22,7 +22,6 @@ const APIVersion = "v1alpha1"
 type Config struct {
 	Instances core.InstanceService
 	Nodes     core.NodeService
-	Scheduler core.Scheduler
 	Bus       bus.Bus
 	// BootstrapToken is the shared secret an agent presents to register.
 	// Empty disables agent registration entirely.
@@ -31,7 +30,7 @@ type Config struct {
 
 // Register mounts this version onto the engine under its own group.
 func Register(r *gin.Engine, cfg Config) {
-	h := handler.New(cfg.Instances, cfg.Nodes, cfg.Scheduler)
+	h := handler.New(cfg.Instances, cfg.Nodes)
 
 	bootstrap := &handler.Bootstrap{
 		Token: cfg.BootstrapToken,
