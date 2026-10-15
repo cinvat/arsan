@@ -66,6 +66,7 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 			ReadHeaderTimeout: 10 * time.Second,
 			Protocols:         &http.Protocols{},
 		}
+		srv.Protocols.SetHTTP1(true)
 		srv.Protocols.SetUnencryptedHTTP2(true)
 
 		errCh := make(chan error, 1)
