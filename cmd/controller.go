@@ -35,11 +35,16 @@ neither imports the other's libraries.`,
 		}
 		defer commands.Close()
 
+		store, err := mustStore()
+		if err != nil {
+			return err
+		}
+
 		c, err := app.NewController(app.Config{
 			SchedulerMaxAttempts:   viper.GetInt("scheduler.max-attempts"),
 			ComputeSweepInterval:   viper.GetDuration("compute.sweep-interval"),
 			ComputeDriverOpTimeout: viper.GetDuration("compute.driver-operation-timeout"),
-		}, commands, log)
+		}, store, commands, log)
 		if err != nil {
 			return err
 		}
@@ -74,11 +79,14 @@ func subscribe(ctx context.Context, c *app.Controller, log app.Logger) error {
 	}
 
 	for _, h := range handlers {
-		stop, err := c.Commands.Subscribe(ctx, h.topic, h.fn)
-		if err != nil {
+		// No stop is kept: the subscriptions live as long as the process, and
+		// commands.Close (deferred by the caller) stops them all. A
+		// `defer stop()` here would fire when this function returns —
+		// milliseconds after subscribing — and silently deafen the
+		// controller. That is exactly what it did.
+		if _, err := c.Commands.Subscribe(ctx, h.topic, h.fn); err != nil {
 			return err
 		}
-		defer stop()
 		log.Info("subscribed", "topic", h.topic)
 	}
 	return nil
@@ -115,6 +123,7 @@ func onInstanceCreate(c *app.Controller, log app.Logger) func(context.Context, b
 	return func(ctx context.Context, cmd bus.Command) error {
 		inst, err := c.Store.Get(ctx, cmd.Target)
 		if err != nil {
+			log.Error("build: read failed", "instance", cmd.Target, "err", err)
 			return err
 		}
 		if inst.State != core.StatePending {
@@ -132,6 +141,7 @@ func onInstanceCreate(c *app.Controller, log app.Logger) func(context.Context, b
 
 func init() {
 	controllerCmd.Flags().String("bus.url", "nats://127.0.0.1:4222", "NATS URL for the command bus")
+	controllerCmd.Flags().String("db", "", "shared database: postgres:// URL, SQLite file path, or empty for memory (dev only)")
 	controllerCmd.Flags().Int("scheduler.max-attempts", 5, "placement attempts before giving up")
 	controllerCmd.Flags().Duration("compute.sweep-interval", 30*time.Second, "how often to reconcile stranded instances")
 	controllerCmd.Flags().Duration("compute.driver-operation-timeout", 5*time.Minute, "deadline for a single compute engine call")

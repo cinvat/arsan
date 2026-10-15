@@ -10,7 +10,6 @@ import (
 	"github.com/cinvat/arsan/api"
 	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/records"
-	"github.com/cinvat/arsan/internal/store/memory"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -43,7 +42,10 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 		// NOT assemble a scheduler, a compute service or a node watcher:
 		// those are the controller's, and importing them here is exactly the
 		// coupling this separation exists to prevent.
-		store := memory.New()
+		store, err := mustStore()
+		if err != nil {
+			return err
+		}
 		nodes := &records.Nodes{Store: store}
 		instances := &records.Instances{Store: store, Bus: commands}
 
@@ -91,6 +93,7 @@ func bootstrapToken() string {
 func init() {
 	apiCmd.Flags().String("addr", ":8080", "HTTP listen address")
 	apiCmd.Flags().String("bus.url", "nats://127.0.0.1:4222", "NATS URL for the command bus")
+	apiCmd.Flags().String("db", "", "shared database: postgres:// URL, SQLite file path, or empty for memory (dev only)")
 	apiCmd.Flags().String("bootstrap.token", "", "shared bootstrap token agents present to register")
 
 	rootCmd.AddCommand(apiCmd)

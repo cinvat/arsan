@@ -7,8 +7,8 @@ else dials out to it.
 go build -o arsan .
 nats-server -js &
 
-./arsan api --addr=:8080 --bootstrap.token=s3cret &
-./arsan controller &
+./arsan api --addr=:8080 --bootstrap.token=s3cret --db=/tmp/arsan.db &
+./arsan controller --db=/tmp/arsan.db &
 ./arsan agent --driver=fake -t s3cret &
 ```
 

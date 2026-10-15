@@ -11,6 +11,7 @@ import (
 	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/internal/driver/fake"
+	"github.com/cinvat/arsan/internal/store/memory"
 )
 
 // quiet swallows log output so a failing test's cause is visible.
@@ -52,7 +53,7 @@ func newTestController(t *testing.T, answering bool) *Controller {
 	if answering {
 		commands = &loopback{worker: agent.NewWorker("n-1", fake.New())}
 	}
-	c, err := NewController(Config{}, commands, quiet{})
+	c, err := NewController(Config{}, memory.New(), commands, quiet{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -198,14 +198,18 @@ go build -o arsan .
 
 ```sh
 # REST API (CRUD + commands onto the bus; no placement, no engine)
-./arsan api --addr=:8080 --bootstrap.token=s3cret
+./arsan api --addr=:8080 --bootstrap.token=s3cret --db=/tmp/arsan.db
 
-# Control plane loops only, no HTTP
-./arsan controller
+# Control plane loops only, no HTTP (same --db: the split only works shared)
+./arsan controller --db=/tmp/arsan.db
 
 # Compute node agent: token in, everything else learned by asking.
 ./arsan agent --driver=fake -t s3cret
 ```
+
+`--db` is a postgres:// URL, a SQLite file both processes open, or empty for
+in-memory (dev only: two processes with two memory stores cannot see each
+other).
 
 ## Non-Negotiables
 

@@ -19,7 +19,6 @@ import (
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/internal/driver/remote"
 	"github.com/cinvat/arsan/internal/scheduler"
-	"github.com/cinvat/arsan/internal/store/memory"
 )
 
 // Config is the runtime configuration, read from viper by the caller.
@@ -36,10 +35,17 @@ type Logger interface {
 	Error(msg string, kv ...any)
 }
 
+// Stores is what a process needs to share: instance rows and node rows live
+// in one database so the api and the controller see each other.
+type Stores interface {
+	core.InstanceStore
+	core.NodeStore
+}
+
 // Controller is the business-logic half: placement, the instance state machine,
 // and node liveness.
 type Controller struct {
-	Store     *memory.Store
+	Store     Stores
 	Scheduler *scheduler.Scheduler
 	Compute   *compute.Service
 	Commands  bus.Bus
@@ -49,22 +55,22 @@ type Controller struct {
 // NewController assembles the control plane and subscribes it to the command
 // bus. It touches no controller library from the api's side, because the api
 // never calls it.
-func NewController(cfg Config, commands bus.Bus, log Logger) (*Controller, error) {
-	store := memory.New()
-
+func NewController(cfg Config, store Stores, commands bus.Bus, log Logger) (*Controller, error) {
+	sched := scheduler.New(scheduler.Config{
+		Instances:   store,
+		Nodes:       store,
+		DriverFor:   drivers(commands),
+		MaxAttempts: cfg.SchedulerMaxAttempts,
+		Log:         log,
+	})
 	c := &Controller{
-		Store:    store,
-		Commands: commands,
-		Scheduler: scheduler.New(scheduler.Config{
-			Instances:   store,
-			Nodes:       store,
-			DriverFor:   drivers(commands),
-			MaxAttempts: cfg.SchedulerMaxAttempts,
-			Log:         log,
-		}),
+		Store:     store,
+		Commands:  commands,
+		Scheduler: sched,
 		Compute: compute.New(compute.Config{
 			Instances:              store,
 			Nodes:                  store,
+			Scheduler:              sched,
 			DriverFor:              drivers(commands),
 			DriverOperationTimeout: cfg.ComputeDriverOpTimeout,
 			SweepInterval:          cfg.ComputeSweepInterval,
@@ -106,7 +112,7 @@ func drivers(commands bus.Bus) func(string) (core.Driver, error) {
 // controller an agent exists; whether it can actually run a VM is settled by
 // ProbeAgent, and conflating the two would make a host READY on the strength of
 // a registration it has not yet answered.
-func CheckAgent(store *memory.Store, nodeID string) error {
+func CheckAgent(store Stores, nodeID string) error {
 	_, err := store.GetNode(context.Background(), nodeID)
 	return err
 }
