@@ -13,9 +13,10 @@ import (
 	"github.com/cinvat/arsan/internal/core"
 )
 
-// uri is empty so libvirt applies its default: LIBVIRT_DEFAULT_URI when set,
-// qemu:///system otherwise.
-const uri = ""
+// uri names the daemon explicitly. An empty URI asks libvirt to guess a
+// socket, which fails on hosts where the daemon was never started — an
+// explicit URI fails instead with "cannot connect", which names the cure.
+const uri = "qemu:///system"
 
 // Driver runs VMs through the libvirt daemon directly.
 //
