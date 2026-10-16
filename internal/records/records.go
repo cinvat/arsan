@@ -22,6 +22,7 @@ import (
 	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/pkg/util"
+	"github.com/samber/lo"
 )
 
 // Nodes implements core.NodeService over a node store.
@@ -119,12 +120,8 @@ func (s *Instances) resolveVolumes(ctx context.Context, instID string, req core.
 		return nil, fmt.Errorf("volume store not configured: %w", core.ErrInvalidRequest)
 	}
 	var volumes []core.Volume
-	bootable := 0
 	attach := func(v core.Volume) {
 		volumes = append(volumes, v)
-		if v.BootIndex != nil {
-			bootable++
-		}
 	}
 	for i, spec := range req.Volumes {
 		if spec.VolumeID != "" {
@@ -190,25 +187,23 @@ func (s *Instances) resolveVolumes(ctx context.Context, instID string, req core.
 		root.State = core.VolumeInUse
 		root.AttachedTo = instID
 		volumes = append([]core.Volume{root}, volumes...)
-		bootable++
 	}
+	bootable := lo.CountBy(volumes, func(v core.Volume) bool { return v.BootIndex != nil })
 	if bootable == 0 && len(volumes) > 0 {
 		zero := 0
 		volumes[0].BootIndex = &zero
 		if _, err := s.Volumes.SetVolumeBootIndex(ctx, volumes[0].ID, &zero); err != nil {
 			return nil, err
 		}
-		bootable = 1
 	}
-	if bootable > 1 {
+	if lo.CountBy(volumes, func(v core.Volume) bool { return v.BootIndex != nil }) > 1 {
 		return nil, fmt.Errorf("at most one boot volume per VM, use set-boot to move it: %w", core.ErrInvalidRequest)
 	}
-	attachments := make([]core.VolumeAttachment, 0, len(volumes))
-	for i, v := range volumes {
-		attachments = append(attachments, core.VolumeAttachment{
+	attachments := lo.Map(volumes, func(v core.Volume, i int) core.VolumeAttachment {
+		return core.VolumeAttachment{
 			VolumeID: v.ID, Device: fmt.Sprintf("vd%c", 'a'+byte(i)), BootIndex: v.BootIndex,
-		})
-	}
+		}
+	})
 	return attachments, nil
 }
 
@@ -221,9 +216,7 @@ func (s *Volumes) Create(ctx context.Context, req core.CreateVolumeRequest) (cor
 	if err := core.ValidateName(req.Name); err != nil {
 		return core.Volume{}, err
 	}
-	if req.Namespace == "" {
-		req.Namespace = core.DefaultNamespace
-	}
+	req.Namespace = lo.CoalesceOrEmpty(req.Namespace, core.DefaultNamespace)
 	if err := core.ValidateNamespace(req.Namespace); err != nil {
 		return core.Volume{}, err
 	}
@@ -273,9 +266,7 @@ func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) 
 	if err := core.ValidateName(req.Name); err != nil {
 		return core.Instance{}, err
 	}
-	if req.Namespace == "" {
-		req.Namespace = core.DefaultNamespace
-	}
+	req.Namespace = lo.CoalesceOrEmpty(req.Namespace, core.DefaultNamespace)
 	if err := core.ValidateNamespace(req.Namespace); err != nil {
 		return core.Instance{}, err
 	}
@@ -288,11 +279,11 @@ func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) 
 	if err != nil {
 		return core.Instance{}, err
 	}
-	for _, e := range existing {
-		if e.Namespace == req.Namespace && e.Name == req.Name {
-			return core.Instance{}, fmt.Errorf("virtualmachine %s/%s exists: %w",
-				req.Namespace, req.Name, core.ErrInvalidRequest)
-		}
+	if lo.ContainsBy(existing, func(e core.Instance) bool {
+		return e.Namespace == req.Namespace && e.Name == req.Name
+	}) {
+		return core.Instance{}, fmt.Errorf("virtualmachine %s/%s exists: %w",
+			req.Namespace, req.Name, core.ErrInvalidRequest)
 	}
 	flavor := req.Flavor
 	if req.FlavorRef != "" {
