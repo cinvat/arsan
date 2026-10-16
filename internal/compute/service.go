@@ -521,6 +521,17 @@ func (s *Service) Reconcile(ctx context.Context) error {
 	}
 
 	for _, i := range all {
+		// TERMINATING is deletion in progress: drive the teardown on every
+		// sweep, with no staleness gate. Delete is idempotent, so this is
+		// safe to repeat, and it is the only thing that can finish a delete
+		// whose agent is unreachable — the record must not outlive the
+		// intent just because a host is off.
+		if i.State == core.StateTerminating {
+			if err := s.Delete(ctx, i.ID); err != nil {
+				s.cfg.Log.Warn("sweep teardown", "instance", i.ID, "err", err)
+			}
+			continue
+		}
 		if i.State != core.StateScheduling && i.State != core.StateBuilding {
 			continue
 		}

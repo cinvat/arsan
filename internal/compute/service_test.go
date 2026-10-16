@@ -418,6 +418,24 @@ func TestSetBootVolumeNeedsAttach(t *testing.T) {
 	}
 }
 
+// A sweep finishes a TERMINATING row without waiting for staleness: teardown
+// is idempotent, so there is no in-flight work to protect, and the record
+// must not outlive the intent just because a host is off.
+func TestSweepCompletesTerminating(t *testing.T) {
+	svc, st, _ := setup(t)
+	ctx := context.Background()
+	pending(t, st, "i-1")
+	if _, err := st.Transition(ctx, "i-1", core.StatePending, core.StateTerminating); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if _, err := st.Get(ctx, "i-1"); err == nil {
+		t.Fatal("TERMINATING row survived the sweep: the delete never completed")
+	}
+}
+
 // A sweep retry rebuilds a stranded build instead of stranding it further.
 func TestSweepRebuildsStranded(t *testing.T) {
 	svc, st, _ := setup(t)
