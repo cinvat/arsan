@@ -2,16 +2,44 @@ package core
 
 import "time"
 
+// InstanceState is the lifecycle of a VM: arsan's control-plane states for
+// work it has not finished, libvirt's guest states for what the hypervisor
+// reports.
+//
+// Control-plane states (arsan decides): PENDING waits for placement and
+// carries PendingReason while it waits, like a pod with a scheduling gate;
+// SCHEDULING and BUILDING are in-flight; ERROR is a control-plane failure
+// with FailureReason and is terminal until an operator acts.
+//
+// Guest states (the hypervisor decides, the probe observes): RUNNING,
+// SHUTOFF, SHUTDOWN (guest shutting down, transient), PAUSED (observed only —
+// there are no pause/resume ops yet) and CRASHED. BLOCKED folds into RUNNING
+// and PMSUSPENDED into PAUSED; NOSTATE is never stored.
 type InstanceState string
 
 const (
 	StatePending    InstanceState = "PENDING"
 	StateScheduling InstanceState = "SCHEDULING"
 	StateBuilding   InstanceState = "BUILDING"
-	StateActive     InstanceState = "ACTIVE"
+	StateRunning    InstanceState = "RUNNING"
 	StateShutoff    InstanceState = "SHUTOFF"
+	StateShutdown   InstanceState = "SHUTDOWN"
+	StatePaused     InstanceState = "PAUSED"
+	StateCrashed    InstanceState = "CRASHED"
 	StateError      InstanceState = "ERROR"
 )
+
+// Steady reports whether the state is a settled guest state. Only steady
+// states converge both ways during reconcile; transient and terminal states
+// are owned by whoever put the record there, and the probe leaves them alone.
+func (s InstanceState) Steady() bool {
+	switch s {
+	case StateRunning, StateShutoff, StateShutdown, StatePaused, StateCrashed:
+		return true
+	default:
+		return false
+	}
+}
 
 // Resources describe a node: CPU count, RAM in MiB, Disk in MiB.
 // Nodes have CPUs; virtual machines have VCPUs (core.Flavor). The scheduler
@@ -77,7 +105,13 @@ type Instance struct {
 	Generation int
 	// PinnedCPUs holds the exclusive host CPUs for a dedicated flavor,
 	// claimed at placement and freed on teardown. Empty for shared flavors.
-	PinnedCPUs    []int
+	PinnedCPUs []int
+	// PendingReason says why a PENDING instance is still waiting (no valid
+	// node, capacity lost, …), cleared when placement succeeds. FailureReason
+	// is the ERROR counterpart: control-plane failures live there, waiting
+	// lives here, so a pending VM never looks broken and a broken one never
+	// looks merely queued.
+	PendingReason string
 	FailureReason string
 	CreatedAt     time.Time
 	UpdatedAt     time.Time

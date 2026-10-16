@@ -17,6 +17,17 @@ type Driver interface {
 	Reboot(ctx context.Context, id string) error
 	Migrate(ctx context.Context, id, targetNodeID string) error
 	Usage(ctx context.Context) (Resources, error)
+	// Domains reports the hypervisor's observed guest states, keyed by
+	// instance id. It is the reconcile input: control-plane states are never
+	// reported, and guests the driver does not know are simply absent.
+	Domains(ctx context.Context) ([]DomainStatus, error)
+}
+
+// DomainStatus is one observed guest: the id arsan defined it under and its
+// steady guest state (RUNNING, SHUTOFF, SHUTDOWN, PAUSED or CRASHED).
+type DomainStatus struct {
+	InstanceID string
+	State      InstanceState
 }
 
 type CreateRequest struct {
