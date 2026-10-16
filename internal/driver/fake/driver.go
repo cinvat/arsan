@@ -135,3 +135,17 @@ func (d *Driver) Usage(ctx context.Context) (core.Resources, error) {
 	defer d.mu.Unlock()
 	return d.usage, nil
 }
+
+func (d *Driver) Domains(ctx context.Context) ([]core.DomainStatus, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var out []core.DomainStatus
+	for id, info := range d.vms {
+		state := core.StateShutoff
+		if info.Started {
+			state = core.StateRunning
+		}
+		out = append(out, core.DomainStatus{InstanceID: id, State: state})
+	}
+	return out, nil
+}

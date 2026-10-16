@@ -103,6 +103,14 @@ func (d *Driver) Usage(ctx context.Context) (core.Resources, error) {
 	return resp.Usage, nil
 }
 
+func (d *Driver) Domains(ctx context.Context) ([]core.DomainStatus, error) {
+	resp, err := d.call(ctx, agent.Request{Op: agent.OpDomains})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Domains, nil
+}
+
 // Info asks the agent what it runs and what its host holds. The controller
 // calls this after the probe succeeds and records the answer on the node, so
 // the agent never has to describe itself at bootstrap.

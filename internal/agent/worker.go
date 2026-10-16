@@ -27,6 +27,7 @@ const (
 	OpReboot   Operation = "reboot"
 	OpMigrate  Operation = "migrate"
 	OpUsage    Operation = "usage"
+	OpDomains  Operation = "domains"
 )
 
 // Request is one engine call.
@@ -41,14 +42,15 @@ type Request struct {
 	TargetNodeID string      `json:"target_node_id,omitempty"`
 }
 
-// Response answers it. Info and Usage ride along only on their own ops.
+// Response answers it. Info, Usage and Domains ride along only on their own ops.
 type Response struct {
-	OK     bool              `json:"ok"`
-	Error  string            `json:"error,omitempty"`
-	Info   core.InstanceInfo `json:"info,omitempty"`
-	Usage  core.Resources    `json:"usage,omitempty"`
-	Engine string            `json:"engine,omitempty"`
-	Total  core.Resources    `json:"total,omitempty"`
+	OK      bool                `json:"ok"`
+	Error   string              `json:"error,omitempty"`
+	Info    core.InstanceInfo   `json:"info,omitempty"`
+	Usage   core.Resources      `json:"usage,omitempty"`
+	Domains []core.DomainStatus `json:"domains,omitempty"`
+	Engine  string              `json:"engine,omitempty"`
+	Total   core.Resources      `json:"total,omitempty"`
 }
 
 // Worker answers engine calls for one node. It owns nothing but the engine:
@@ -139,6 +141,12 @@ func (w *Worker) exec(ctx context.Context, req Request) (Response, error) {
 			return Response{}, err
 		}
 		return Response{Usage: usage}, nil
+	case OpDomains:
+		domains, err := w.driver.Domains(ctx)
+		if err != nil {
+			return Response{}, err
+		}
+		return Response{Domains: domains}, nil
 	default:
 		return Response{}, fmt.Errorf("unknown op %q", req.Op)
 	}

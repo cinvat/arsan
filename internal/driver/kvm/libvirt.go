@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	libvirt "libvirt.org/go/libvirt"
@@ -333,6 +334,65 @@ func (d *Driver) HostCapacity(ctx context.Context) (core.Resources, error) {
 		return nil
 	})
 	return out, err
+}
+
+// Domains reports observed guest states for reconcile. Only domains this
+// driver defined (the arsan- prefix) are reported, and only steady guest
+// states: BLOCKED folds into RUNNING, PMSUSPENDED into PAUSED, and NOSTATE
+// is skipped rather than stored.
+func (d *Driver) Domains(ctx context.Context) ([]core.DomainStatus, error) {
+	var out []core.DomainStatus
+	err := d.do(ctx, func() error {
+		doms, err := d.conn.ListAllDomains(0)
+		if err != nil {
+			return err
+		}
+		for i := range doms {
+			dom := &doms[i]
+			name, err := dom.GetName()
+			if err != nil {
+				dom.Free()
+				continue
+			}
+			id, ok := strings.CutPrefix(name, "arsan-")
+			if !ok {
+				dom.Free()
+				continue
+			}
+			state, _, err := dom.GetState()
+			dom.Free()
+			if err != nil {
+				continue
+			}
+			s, ok := guestState(state)
+			if !ok {
+				continue
+			}
+			out = append(out, core.DomainStatus{InstanceID: id, State: s})
+		}
+		return nil
+	})
+	return out, err
+}
+
+// guestState maps a libvirt domain state onto a stored guest state. The
+// second return is false for NOSTATE, which is never recorded: it means
+// libvirt itself does not know, and churning the record on it helps nothing.
+func guestState(state libvirt.DomainState) (core.InstanceState, bool) {
+	switch state {
+	case libvirt.DOMAIN_RUNNING, libvirt.DOMAIN_BLOCKED:
+		return core.StateRunning, true
+	case libvirt.DOMAIN_SHUTOFF:
+		return core.StateShutoff, true
+	case libvirt.DOMAIN_SHUTDOWN:
+		return core.StateShutdown, true
+	case libvirt.DOMAIN_PAUSED, libvirt.DOMAIN_PMSUSPENDED:
+		return core.StatePaused, true
+	case libvirt.DOMAIN_CRASHED:
+		return core.StateCrashed, true
+	default:
+		return "", false
+	}
 }
 
 // Usage sums what running domains hold. Placement decisions come from

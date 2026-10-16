@@ -59,8 +59,18 @@ func TestRemoteDriverRoundTrip(t *testing.T) {
 	if _, err := d.Usage(ctx); err != nil {
 		t.Fatalf("usage: %v", err)
 	}
+	if doms, err := d.Domains(ctx); err != nil {
+		t.Fatalf("domains: %v", err)
+	} else if len(doms) != 1 || doms[0].InstanceID != "i-1" || doms[0].State != core.StateRunning {
+		t.Fatalf("domains = %+v, want i-1 RUNNING", doms)
+	}
 	if err := d.Stop(ctx, "i-1"); err != nil {
 		t.Fatalf("stop: %v", err)
+	}
+	if doms, err := d.Domains(ctx); err != nil {
+		t.Fatalf("domains: %v", err)
+	} else if len(doms) != 1 || doms[0].State != core.StateShutoff {
+		t.Fatalf("domains = %+v, want i-1 SHUTOFF", doms)
 	}
 	if err := d.Delete(ctx, "i-1"); err != nil {
 		t.Fatalf("delete: %v", err)
