@@ -17,12 +17,14 @@ package kvm
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/cinvat/arsan/internal/core"
+	"github.com/samber/lo"
 )
 
 // domainName maps an instance to a libvirt domain name: "<namespace>-<name>".
@@ -144,11 +146,7 @@ func volumesMeta(req core.CreateRequest, files map[string]string) string {
 	for _, att := range req.Volumes {
 		byID[att.Volume.ID] = att
 	}
-	ids := make([]string, 0, len(files))
-	for id := range files {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
+	ids := slices.Sorted(maps.Keys(files))
 	var b strings.Builder
 	for _, id := range ids {
 		del := "false"
@@ -268,12 +266,10 @@ func pinsMatchDesc(desc string, req core.CreateRequest) bool {
 	if len(req.PinnedCPUs) != req.Flavor.VCPU.Count() {
 		return false
 	}
-	for i, cpu := range req.PinnedCPUs {
-		if !strings.Contains(desc, fmt.Sprintf("<vcpupin vcpu='%d' cpuset='%d'/>", i, cpu)) {
-			return false
-		}
-	}
-	return true
+	present := lo.Map(req.PinnedCPUs, func(cpu int, i int) bool {
+		return strings.Contains(desc, fmt.Sprintf("<vcpupin vcpu='%d' cpuset='%d'/>", i, cpu))
+	})
+	return !lo.Contains(present, false)
 }
 
 // cpuset renders pins as a libvirt cpuset: "0-3,7".
