@@ -27,7 +27,7 @@ type CapacityFilter struct{}
 func (CapacityFilter) Name() string { return "Capacity" }
 
 func (CapacityFilter) FilterNodes(_ context.Context, req core.PlacementRequest, nodes []core.Node) ([]core.Node, error) {
-	want := req.Flavor.Resources()
+	want := req.Flavor.Resources().Add(core.DiskResources(req.Disks))
 	out := nodes[:0:0]
 	for _, n := range nodes {
 		if n.Available.Fits(want) {
@@ -125,8 +125,8 @@ func (FlavorFilter) FilterRequest(_ context.Context, req core.PlacementRequest) 
 	if err := req.Flavor.VCPU.Validate(); err != nil {
 		return err
 	}
-	if req.Flavor.RAM <= 0 || req.Flavor.Disk <= 0 {
-		return fmt.Errorf("flavor must have positive ram and disk: %w", core.ErrInvalidRequest)
+	if req.Flavor.RAM <= 0 {
+		return fmt.Errorf("flavor must have positive ram: %w", core.ErrInvalidRequest)
 	}
 	return nil
 }

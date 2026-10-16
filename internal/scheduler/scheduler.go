@@ -107,7 +107,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 		}
 		winner, runnerUp := best(weighed)
 
-		want := req.Flavor.Resources()
+		want := req.Flavor.Resources().Add(core.DiskResources(req.Disks))
 		// Dedicated flavors claim exclusive CPUs, not just counts: the pins
 		// are part of the placement, recorded on the instance by compute.
 		var pins []int
