@@ -37,6 +37,33 @@ func TestExcludeNodesFilter_NoExclusions(t *testing.T) {
 	}
 }
 
+func TestPinnedVolumeFilter_KeepsOnlyPinnedNode(t *testing.T) {
+	nodes := []core.Node{nodeWith("n1"), nodeWith("n2")}
+	req := core.PlacementRequest{Volumes: []core.Volume{
+		{ID: "vol-1", NodeID: "n2"},
+		{ID: "vol-2"},
+	}}
+	got, err := PinnedVolumeFilter{}.FilterNodes(context.Background(), req, nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "n2" {
+		t.Fatalf("got %v, want [n2]", ids(got))
+	}
+}
+
+func TestPinnedVolumeFilter_UnpinnedPassesEverywhere(t *testing.T) {
+	nodes := []core.Node{nodeWith("n1"), nodeWith("n2")}
+	req := core.PlacementRequest{Volumes: []core.Volume{{ID: "vol-1"}}}
+	got, err := PinnedVolumeFilter{}.FilterNodes(context.Background(), req, nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %v, want both nodes", ids(got))
+	}
+}
+
 // An excluded node that does not exist must not disturb the rest.
 func TestExcludeNodesFilter_UnknownIDIsHarmless(t *testing.T) {
 	nodes := []core.Node{nodeWith("n1"), nodeWith("n2")}

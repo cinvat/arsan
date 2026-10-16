@@ -19,6 +19,7 @@ type DriverFor func(nodeID string) (core.Driver, error)
 type Config struct {
 	Instances   core.InstanceStore
 	Nodes       core.NodeStore
+	Volumes     core.VolumeStore
 	DriverFor   DriverFor
 	MaxAttempts int
 	Log         Logger
@@ -33,6 +34,7 @@ type Logger interface {
 type Scheduler struct {
 	instances   core.InstanceStore
 	nodes       core.NodeStore
+	volumes     core.VolumeStore
 	driverFor   DriverFor
 	maxAttempts int
 	log         Logger
@@ -50,6 +52,7 @@ func New(cfg Config) *Scheduler {
 	s := &Scheduler{
 		instances:   cfg.Instances,
 		nodes:       cfg.Nodes,
+		volumes:     cfg.Volumes,
 		driverFor:   cfg.DriverFor,
 		maxAttempts: max,
 		log:         cfg.Log,
@@ -60,6 +63,7 @@ func New(cfg Config) *Scheduler {
 	s.nodeFilters = []core.NodeFilter{
 		ExcludeNodesFilter{}, // before the rest: a ruled-out node is never reconsidered
 		StateFilter{},        // rejects the most nodes for the least work
+		PinnedVolumeFilter{}, // locality before capacity: pinned files do not move
 		CapacityFilter{},
 		ArchFilter{},
 		GroupFilter{},
@@ -107,7 +111,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 		}
 		winner, runnerUp := best(weighed)
 
-		want := req.Flavor.Resources().Add(core.DiskResources(req.Disks))
+		want := req.Flavor.Resources().Add(core.VolumeResources(req.Volumes))
 		// Dedicated flavors claim exclusive CPUs, not just counts: the pins
 		// are part of the placement, recorded on the instance by compute.
 		var pins []int
@@ -136,8 +140,64 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 			}
 			return core.Placement{}, fmt.Errorf("claim %s: %w", winner.NodeID, err)
 		}
+		// Claim every volume: compare-and-swap on available holds exactly
+		// one holder, so two VMs racing for one prepared disk resolve here.
+		attached := make([]string, 0, len(req.Volumes))
+		volumeLost := ""
+		for _, v := range req.Volumes {
+			if _, err := s.volumes.AttachVolume(ctx, v.ID, req.InstanceID); err != nil {
+				if errors.Is(err, core.ErrCapacityConflict) {
+					volumeLost = v.ID
+				} else if errors.Is(err, core.ErrVolumeNotFound) {
+					volumeLost = v.ID
+				} else {
+					release()
+					for _, id := range attached {
+						_, _ = s.volumes.DetachVolume(ctx, id)
+					}
+					return core.Placement{}, fmt.Errorf("claim volumes %s: %w", winner.NodeID, err)
+				}
+				break
+			}
+			attached = append(attached, v.ID)
+		}
+		if volumeLost != "" {
+			release()
+			for _, id := range attached {
+				_, _ = s.volumes.DetachVolume(ctx, id)
+			}
+			lastConflict = fmt.Sprintf("attempt %d: volume %s no longer available", attempt, volumeLost)
+			s.log.Warn("claim lost, retrying", "attempt", attempt, "node", winner.NodeID)
+			continue
+		}
+		// Pin unpinned volumes to the winner: the first provisioning decides
+		// the node, and files never move afterwards. A pin lost in a race
+		// retries; a pin to another node stays sticky even on failure below —
+		// unpinning could orphan files a failed build already provisioned,
+		// while waiting is always safe.
+		for _, v := range req.Volumes {
+			if v.NodeID != "" {
+				continue
+			}
+			if _, err := s.volumes.PinVolume(ctx, v.ID, winner.NodeID); err != nil {
+				release()
+				for _, id := range attached {
+					_, _ = s.volumes.DetachVolume(ctx, id)
+				}
+				lastConflict = fmt.Sprintf("attempt %d: volume %s pinned elsewhere", attempt, v.ID)
+				s.log.Warn("claim lost, retrying", "attempt", attempt, "node", winner.NodeID)
+				volumeLost = v.ID
+				break
+			}
+		}
+		if volumeLost != "" {
+			continue
+		}
 		if err := s.nodes.AttachInstance(ctx, winner.NodeID, req.InstanceID); err != nil {
 			release()
+			for _, id := range attached {
+				_, _ = s.volumes.DetachVolume(ctx, id)
+			}
 			return core.Placement{}, fmt.Errorf("attach instance: %w", err)
 		}
 

@@ -22,12 +22,37 @@ func (StateFilter) FilterNodes(_ context.Context, _ core.PlacementRequest, nodes
 	return out, nil
 }
 
+type PinnedVolumeFilter struct{}
+
+func (PinnedVolumeFilter) Name() string { return "PinnedVolume" }
+
+// FilterNodes drops nodes that do not hold a pinned volume the request
+// needs. A volume's files live where it was first provisioned and do not
+// migrate, so a request naming a volume pinned elsewhere has exactly one
+// eligible node — or none, which is a pending reason, not an error.
+func (PinnedVolumeFilter) FilterNodes(_ context.Context, req core.PlacementRequest, nodes []core.Node) ([]core.Node, error) {
+	out := nodes[:0:0]
+	for _, n := range nodes {
+		ok := true
+		for _, v := range req.Volumes {
+			if v.NodeID != "" && v.NodeID != n.ID {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
 type CapacityFilter struct{}
 
 func (CapacityFilter) Name() string { return "Capacity" }
 
 func (CapacityFilter) FilterNodes(_ context.Context, req core.PlacementRequest, nodes []core.Node) ([]core.Node, error) {
-	want := req.Flavor.Resources().Add(core.DiskResources(req.Disks))
+	want := req.Flavor.Resources().Add(core.VolumeResources(req.Volumes))
 	out := nodes[:0:0]
 	for _, n := range nodes {
 		if n.Available.Fits(want) {
