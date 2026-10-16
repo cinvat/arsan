@@ -31,10 +31,12 @@ type Bootstrap struct {
 }
 
 // registerNodeRequest is what an agent sends on every bootstrap: identity
-// and nothing else.
+// and its primary IP for display. Nothing here is load-bearing: capacity
+// arrives via the probe, routing via the node id.
 type registerNodeRequest struct {
 	Token string `json:"token"`
 	Name  string `json:"name"`
+	IP    string `json:"ip"`
 }
 
 func (b *Bootstrap) RegisterNode(c *gin.Context) {
@@ -57,7 +59,7 @@ func (b *Bootstrap) RegisterNode(c *gin.Context) {
 
 	// Upsert. Re-registering leaves state, spec and reservations alone, so an
 	// agent restarting does not reset a host that is mid-build.
-	node, err := b.Nodes.Register(ctx, core.RegisterNodeRequest{Name: req.Name})
+	node, err := b.Nodes.Register(ctx, core.RegisterNodeRequest{Name: req.Name, IP: req.IP})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errBody("internal", err))
 		return

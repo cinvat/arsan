@@ -128,6 +128,7 @@ func (instanceRow) TableName() string { return "instances" }
 type nodeRow struct {
 	ID             string `gorm:"primaryKey;size:64"`
 	Name           string `gorm:"size:255"`
+	IP             string `gorm:"size:64"`
 	Arch           string `gorm:"size:32"`
 	State          string `gorm:"size:32;index"`
 	Enabled        bool
@@ -248,6 +249,7 @@ func toNode(r nodeRow) core.Node {
 	return core.Node{
 		ID:             r.ID,
 		Name:           r.Name,
+		IP:             r.IP,
 		Arch:           r.Arch,
 		State:          core.NodeState(r.State),
 		Enabled:        r.Enabled,
@@ -266,6 +268,7 @@ func fromNode(n core.Node) nodeRow {
 	return nodeRow{
 		ID:             n.ID,
 		Name:           n.Name,
+		IP:             n.IP,
 		Arch:           n.Arch,
 		State:          string(n.State),
 		Enabled:        n.Enabled,

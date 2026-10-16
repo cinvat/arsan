@@ -218,6 +218,11 @@ func (s *Store) Register(ctx context.Context, n core.Node) (core.Node, error) {
 	defer s.mu.Unlock()
 	if existing, ok := s.nodes[n.ID]; ok {
 		existing.Name = n.Name
+		// An agent restarting on a new address re-reports it; like the
+		// name, the IP is refreshed, never load-bearing.
+		if n.IP != "" {
+			existing.IP = n.IP
+		}
 		s.nodes[n.ID] = existing
 		return existing, nil
 	}

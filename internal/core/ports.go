@@ -167,6 +167,7 @@ type Scheduler interface {
 
 type RegisterNodeRequest struct {
 	Name string `json:"name"`
+	IP   string `json:"ip"`
 }
 
 type NodeService interface {

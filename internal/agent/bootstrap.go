@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 
@@ -23,6 +24,24 @@ import (
 type BootstrapRequest struct {
 	Token string `json:"token"`
 	Name  string `json:"name"`
+	// IP is the agent's primary address, informational only: routing uses
+	// agent.<node-id> on the bus, never this.
+	IP string `json:"ip,omitempty"`
+}
+
+// HostIP returns the address the host would use outbound: a UDP dial that
+// sends nothing, just asks the kernel which source it would pick. Empty when
+// it cannot be determined; bootstrap treats that as "unknown", not an error.
+func HostIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return addr.IP.String()
+	}
+	return ""
 }
 
 // BootstrapError describes a rejected registration.

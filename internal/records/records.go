@@ -38,6 +38,7 @@ func (s *Nodes) Register(ctx context.Context, req core.RegisterNodeRequest) (cor
 	return s.Store.Register(ctx, core.Node{
 		ID:      NodeID(req.Name),
 		Name:    req.Name,
+		IP:      req.IP,
 		Enabled: true,
 	})
 }

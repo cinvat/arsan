@@ -191,9 +191,13 @@ func (s *Store) Register(ctx context.Context, n core.Node) (core.Node, error) {
 	switch {
 	case err == nil:
 		// Re-registration keeps state, spec and reservations; only the name
-		// is refreshed. An agent restarting must not reset a host mid-build.
+		// and the reported IP are refreshed. An agent restarting must not
+		// reset a host mid-build.
 		updates := map[string]any{
 			"name": n.Name, "updated_at": time.Now().UTC(),
+		}
+		if n.IP != "" {
+			updates["ip"] = n.IP
 		}
 		if err := s.withTimeout(ctx).Model(&nodeRow{}).
 			Where("id = ?", n.ID).Updates(updates).Error; err != nil {

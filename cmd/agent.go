@@ -60,11 +60,12 @@ var agentCmd = &cobra.Command{
 		defer commands.Close()
 
 		// Register over REST, like a kubelet registering its Node object.
-		// The request carries nothing but identity: the controller learns
-		// everything else by asking, after the probe says the agent answers.
+		// The request carries identity plus its IP for display: the
+		// controller learns everything else by asking, after the probe says
+		// the agent answers.
 		node, err := agent.RetryBootstrap(ctx, func(c context.Context) (core.Node, error) {
 			return agent.Register(c, viper.GetString("api.url"), "v1alpha1", token,
-				agent.BootstrapRequest{Name: name})
+				agent.BootstrapRequest{Name: name, IP: agent.HostIP()})
 		}, bootstrapAttempts, bootstrapBackoff)
 		if err != nil {
 			return fmt.Errorf("agent: %w", err)

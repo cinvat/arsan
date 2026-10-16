@@ -112,7 +112,11 @@ type Node struct {
 	Enabled bool
 	// Driver and Total are filled by the controller's probe, never by
 	// bootstrap: the agent joins knowing nothing but the token.
-	Driver    string
+	Driver string
+	// IP is the agent's primary address as reported at bootstrap, for an
+	// operator reading the API. Routing never uses it: the bus address is
+	// agent.<node-id>, so a stale or NAT'd IP cannot misdirect commands.
+	IP        string
 	Total     Resources
 	Available Resources
 	Usage     Resources
