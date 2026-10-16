@@ -84,48 +84,78 @@ func (r Resources) Add(other Resources) Resources {
 }
 
 // Flavor sizes a VM's compute: vCPU topology and RAM in MiB. Storage is not
-// a flavor concern: a VM takes zero or more disks plus an optional cdrom,
-// each an individually named, sized and (de)attachable volume.
+// a flavor concern: VMs take volumes, Nova-style, each an individually
+// named, sized and (de)attachable record.
 type Flavor struct {
 	Name string
 	VCPU VCPU
 	RAM  int
 }
 
-// Disk is one extra data disk on a VM, snapshotted at attach time. The root
-// disk is implicit — a thin overlay of the VM's image, always index 0 — so
-// extras start at 1. Index is assigned at attach and never reused, which is
-// what keeps detached gaps from renaming the survivors' files.
-type Disk struct {
-	// Name is operator-chosen ("data", "logs"), DNS_LABEL like everything
-	// else a human types. Index is the stable file number.
-	Name  string
-	Index int
-	// SizeMiB sizes a blank qcow2. With Image set it caps an overlay of that
-	// base instead; zero means "base virtual size", resolved by the engine.
+// Volume states, Cinder-style: free to claim, or held by one instance.
+type VolumeState string
+
+const (
+	VolumeAvailable VolumeState = "available"
+	VolumeInUse     VolumeState = "in-use"
+)
+
+// Volume is a first-class named disk, independent of any VM: create it from
+// a base image, blank, or an iso (cdrom), attach it to one VM at a time by
+// id, detach it, delete it. The hypervisor file derives from its identity
+// and is deleted with it exactly when DeleteOnTermination says so.
+type Volume struct {
+	ID        string
+	Name      string
+	Namespace string
+	// SizeMiB sizes the qcow2. Zero on an image source means "base virtual
+	// size", resolved by the engine at provisioning.
 	SizeMiB int
-	// Image names another base to overlay. Empty provisions a blank disk.
+	// Image names the base to overlay, or an iso for a cdrom. Empty
+	// provisions a blank disk.
 	Image string
+	// Cdrom marks a read-only iso attachment. Isos are shared and never
+	// deleted; DeleteOnTermination is forced false for them.
+	Cdrom bool
+	// BootIndex orders boot: 0 boots first, then 1, and so on; nil means
+	// not bootable. Unset entries boot after indexed ones, in attach order.
+	BootIndex *int
+	// DeleteOnTermination removes the file with the record on VM delete.
+	// Detaching never deletes: it only frees the volume back to available.
+	DeleteOnTermination bool
+	State               VolumeState
+	// AttachedTo names the holder, empty when available. One holder at a
+	// time: the second claim loses the compare-and-swap.
+	AttachedTo string
+	// NodeID pins the volume to the node that first provisioned it. Local
+	// files do not migrate, so a pinned volume only schedules there — the
+	// Cinder pool-affinity equivalent for node-local storage. Empty until
+	// the first claim pins it.
+	NodeID    string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
-// Boot devices, selected per VM. Rescue is attach-cdrom plus boot cdrom,
-// then start.
-const (
-	BootDisk  = "disk"
-	BootCDROM = "cdrom"
-)
+// VolumeAttachment is the VM side of the link: which volume, as which
+// device, in which boot position.
+type VolumeAttachment struct {
+	VolumeID string
+	Device   string
+	// BootIndex mirrors the volume's at attach time, so the domain renders
+	// without re-reading the volume row on every op.
+	BootIndex *int
+}
 
 func (f Flavor) Resources() Resources {
 	return Resources{CPU: f.VCPU.Count(), RAM: f.RAM}
 }
 
-// DiskResources sums extra disks for placement. The root overlay is thin —
-// it shares its base's clusters until written — so it reserves nothing and
-// only declared extras count against node disk.
-func DiskResources(disks []Disk) Resources {
+// VolumeResources sums attached volumes for placement: every byte a VM can
+// write is reserved up front, thin or not.
+func VolumeResources(volumes []Volume) Resources {
 	var out Resources
-	for _, d := range disks {
-		out.Disk += d.SizeMiB
+	for _, v := range volumes {
+		out.Disk += v.SizeMiB
 	}
 	return out
 }
@@ -134,14 +164,12 @@ type Instance struct {
 	ID string
 	// Name and Namespace identify the VM like a pod: the hypervisor domain
 	// is named "<namespace>-<name>", never the internal id.
-	Name       string
-	Namespace  string
-	Flavor     Flavor
-	// Disks are the extra data volumes, snapshotted with their attach-time
-	// size and backing. The root overlay (image) and cdrom ride alongside.
-	Disks      []Disk
-	CdromImage string
-	BootDevice string
+	Name      string
+	Namespace string
+	Flavor    Flavor
+	// Volumes lists attached volume ids with their device and boot order.
+	// The record of sizes and images lives on the volume rows, not here.
+	Volumes    []VolumeAttachment
 	ImageRef   string
 	State      InstanceState
 	NodeID     string

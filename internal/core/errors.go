@@ -11,5 +11,6 @@ var (
 	ErrCapacityConflict    = errors.New("capacity conflict")
 	ErrInvalidRequest      = errors.New("invalid request")
 	ErrFlavorNotFound      = errors.New("flavor not found")
+	ErrVolumeNotFound      = errors.New("volume not found")
 	ErrUnsupportedPlatform = errors.New("hypervisor not available on this platform")
 )

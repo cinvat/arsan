@@ -21,21 +21,15 @@ type Driver interface {
 	// instance id. It is the reconcile input: control-plane states are never
 	// reported, and guests the driver does not know are simply absent.
 	Domains(ctx context.Context) ([]DomainStatus, error)
-	// UpdateDisks redefines a stopped domain with a new disk set: attach
-	// and detach on SHUTOFF, and boot-device switches, converge here.
-	UpdateDisks(ctx context.Context, req CreateRequest) error
-	// AttachDisk provisions one extra disk and plugs it in: live plus
+	// UpdateVolumes redefines a stopped domain with a new volume set.
+	UpdateVolumes(ctx context.Context, req CreateRequest) error
+	// AttachVolume provisions the volume's file and plugs it in: live plus
 	// config when the guest runs, redefine when it does not.
-	AttachDisk(ctx context.Context, req CreateRequest, disk Disk) error
-	// DetachDisk unplugs one extra disk and deletes its file. The record
-	// already dropped it; the file delete always happens, so a shutoff
-	// detach cannot strand storage.
-	DetachDisk(ctx context.Context, req CreateRequest, disk Disk) error
-	// AttachCdrom plugs the iso read-only; DetachCdrom removes it. Boot
-	// order itself only changes at define time: attach, set boot to cdrom
-	// (a stopped redefine), start.
-	AttachCdrom(ctx context.Context, req CreateRequest) error
-	DetachCdrom(ctx context.Context, req CreateRequest, image string) error
+	AttachVolume(ctx context.Context, req CreateRequest, vol AttachedVolume) error
+	// DetachVolume unplugs the volume and deletes its file when the volume
+	// says DeleteOnTermination. The record already dropped it; the file
+	// delete always happens, so a shutoff detach cannot strand storage.
+	DetachVolume(ctx context.Context, req CreateRequest, vol AttachedVolume) error
 }
 
 // DomainStatus is one observed guest: the id arsan defined it under and its
@@ -45,17 +39,23 @@ type DomainStatus struct {
 	State      InstanceState
 }
 
+// AttachedVolume is what the engine renders: the volume row plus the device
+// name and boot position the attachment carries.
+type AttachedVolume struct {
+	Volume
+	Device string
+}
+
 type CreateRequest struct {
 	InstanceID string
 	NodeID     string
 	Name       string
 	Namespace  string
 	Flavor     Flavor
-	// Disks, CdromImage and BootDevice carry the VM's storage: extras indexed
-	// from 1, an optional read-only iso, and which of disk/cdrom boots.
-	Disks      []Disk
-	CdromImage string
-	BootDevice string
+	// Volumes carries the VM's storage in boot/device order: root overlay,
+	// data overlays and blank disks, and read-only cdroms, each with the
+	// device name the attachment assigned.
+	Volumes []AttachedVolume
 	// PinnedCPUs carries the scheduler's exclusive CPUs for a dedicated
 	// flavor. Empty for shared flavors; the engine pins only what is here.
 	PinnedCPUs []int
@@ -129,7 +129,10 @@ type NodeStore interface {
 type CreateInstanceRequest struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
-	ImageRef  string `json:"image_ref"`
+	// ImageRef boots from an image: the api auto-creates a root volume over
+	// it (boot_index 0, delete on termination), Nova image-boot style. Omit
+	// it when Volumes already carries the boot entry.
+	ImageRef string `json:"image_ref"`
 	// FlavorRef names a stored flavor. It is the preferred way to size a VM;
 	// the instance keeps a snapshot of the flavor's resources at create time,
 	// so later flavor edits do not resize existing VMs.
@@ -137,22 +140,63 @@ type CreateInstanceRequest struct {
 	// Flavor is the legacy inline sizing, kept for back-compat. When FlavorRef
 	// is set it wins and Flavor is ignored.
 	Flavor Flavor `json:"flavor"`
-	// Disks are extra data volumes (root is the image overlay, always index
-	// 0). CdromImage attaches an iso read-only. BootDevice is BootDisk or
-	// BootCDROM and selects what boots; a rescue is attach-cdrom plus boot
-	// cdrom, then start.
-	Disks      []CreateDiskRequest `json:"disks"`
-	CdromImage string              `json:"cdrom_image"`
-	BootDevice string              `json:"boot_device"`
+	// Volumes attaches storage at create: inline definitions to provision,
+	// or {volume_id} to claim a prepared one. A rescue disk is just another
+	// entry here, booted with SetBootVolume.
+	Volumes []VolumeSpec `json:"volumes"`
 }
 
-// CreateDiskRequest sizes one extra data disk. Size is required ("10GB");
-// Image optionally names another base to overlay instead of provisioning
-// blank. Indexes are assigned at create, starting at 1.
-type CreateDiskRequest struct {
-	Name  string   `json:"name"`
-	Size  Quantity `json:"size"`
-	Image string   `json:"image"`
+// VolumeSpec is one block_device_mapping entry, Nova-style: either an
+// existing volume by id, or an inline definition to provision. Source is
+// exactly one of image (base/iso to overlay), volume (attach prepared), or
+// neither (blank disk).
+type VolumeSpec struct {
+	VolumeID string   `json:"volume_id"`
+	Name     string   `json:"name"`
+	Size     Quantity `json:"size"`
+	Image    string   `json:"image"`
+	Cdrom    bool     `json:"cdrom"`
+	// BootIndex orders boot: 0 boots first. At most one bootable per VM;
+	// use SetBootVolume to move it.
+	BootIndex *int `json:"boot_index"`
+	// DeleteOnTermination removes the file with the record on VM delete.
+	// Detaching never deletes.
+	DeleteOnTermination bool `json:"delete_on_termination"`
+}
+
+// VolumeStore persists named volumes. Attach and Detach are compare-and-swap
+// on status: only an available volume attaches, only an attached one detaches,
+// so two VMs cannot hold the same disk.
+type VolumeStore interface {
+	CreateVolume(ctx context.Context, v Volume) (Volume, error)
+	GetVolume(ctx context.Context, id string) (Volume, error)
+	ListVolumes(ctx context.Context) ([]Volume, error)
+	DeleteVolume(ctx context.Context, id string) error
+	AttachVolume(ctx context.Context, id, instanceID string) (Volume, error)
+	DetachVolume(ctx context.Context, id string) (Volume, error)
+	// PinVolume records first provisioning: set NodeID iff unset (compare-
+	// and-swap). A pinned volume only schedules on its node; re-pinning a
+	// volume pinned elsewhere reports a conflict instead of moving files
+	// that do not move.
+	PinVolume(ctx context.Context, id, nodeID string) (Volume, error)
+	SetVolumeBootIndex(ctx context.Context, id string, index *int) (Volume, error)
+}
+
+type CreateVolumeRequest struct {
+	Name                string   `json:"name"`
+	Namespace           string   `json:"namespace"`
+	Size                Quantity `json:"size"`
+	Image               string   `json:"image"`
+	Cdrom               bool     `json:"cdrom"`
+	BootIndex           *int     `json:"boot_index"`
+	DeleteOnTermination bool     `json:"delete_on_termination"`
+}
+
+type VolumeService interface {
+	Create(ctx context.Context, req CreateVolumeRequest) (Volume, error)
+	Get(ctx context.Context, id string) (Volume, error)
+	List(ctx context.Context) ([]Volume, error)
+	Delete(ctx context.Context, id string) error
 }
 
 // FlavorStore persists named flavors. Flavors are immutable after creation:
@@ -185,17 +229,15 @@ type InstanceService interface {
 	Start(ctx context.Context, id string) error
 	Stop(ctx context.Context, id string) error
 	Migrate(ctx context.Context, id, targetNodeID string) error
-	AttachDisk(ctx context.Context, id string, disk CreateDiskRequest) error
-	DetachDisk(ctx context.Context, id, name string) error
-	AttachCdrom(ctx context.Context, id, image string) error
-	DetachCdrom(ctx context.Context, id string) error
-	SetBootDevice(ctx context.Context, id, device string) error
+	AttachVolume(ctx context.Context, id, volumeID string, bootIndex *int) error
+	DetachVolume(ctx context.Context, id, volumeID string) error
+	SetBootVolume(ctx context.Context, id, volumeID string) error
 }
 
 type PlacementRequest struct {
 	InstanceID     string
 	Flavor         Flavor
-	Disks          []Disk
+	Volumes        []Volume
 	ImageRef       string
 	NodeID         string
 	ExcludeNodeIDs []string
