@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cinvat/arsan/internal/core"
+	"github.com/samber/lo"
 )
 
 const (
@@ -300,20 +301,15 @@ func (s *Service) DetachVolume(ctx context.Context, id, volumeID string) error {
 	if !liveStates(inst.State) {
 		return fmt.Errorf("detach volume in state %s: %w", inst.State, core.ErrInvalidTransition)
 	}
-	var removed core.VolumeAttachment
-	found := false
-	kept := inst.Volumes[:0:0]
-	for _, att := range inst.Volumes {
-		if att.VolumeID == volumeID {
-			removed = att
-			found = true
-			continue
-		}
-		kept = append(kept, att)
-	}
+	removed, found := lo.Find(inst.Volumes, func(att core.VolumeAttachment) bool {
+		return att.VolumeID == volumeID
+	})
 	if !found {
 		return fmt.Errorf("detach volume %s: not attached: %w", volumeID, core.ErrInstanceNotFound)
 	}
+	kept := lo.Reject(inst.Volumes, func(att core.VolumeAttachment, _ int) bool {
+		return att.VolumeID == volumeID
+	})
 	vol, err := s.cfg.Volumes.GetVolume(ctx, volumeID)
 	if err != nil {
 		return err
@@ -353,13 +349,9 @@ func (s *Service) SetBootVolume(ctx context.Context, id, volumeID string) error 
 	if inst.State != core.StateShutoff {
 		return fmt.Errorf("set boot in state %s: stop the VM first: %w", inst.State, core.ErrInvalidTransition)
 	}
-	found := false
-	for _, att := range inst.Volumes {
-		if att.VolumeID == volumeID {
-			found = true
-		}
-	}
-	if !found {
+	if !lo.ContainsBy(inst.Volumes, func(att core.VolumeAttachment) bool {
+		return att.VolumeID == volumeID
+	}) {
 		return fmt.Errorf("set boot %s: not attached: %w", volumeID, core.ErrInvalidRequest)
 	}
 	for _, att := range inst.Volumes {
@@ -372,13 +364,14 @@ func (s *Service) SetBootVolume(ctx context.Context, id, volumeID string) error 
 			return err
 		}
 	}
-	for i := range inst.Volumes {
-		inst.Volumes[i].BootIndex = nil
-		if inst.Volumes[i].VolumeID == volumeID {
+	inst.Volumes = lo.Map(inst.Volumes, func(att core.VolumeAttachment, _ int) core.VolumeAttachment {
+		att.BootIndex = nil
+		if att.VolumeID == volumeID {
 			zero := 0
-			inst.Volumes[i].BootIndex = &zero
+			att.BootIndex = &zero
 		}
-	}
+		return att
+	})
 	updated, err := s.cfg.Instances.Update(ctx, inst)
 	if err != nil {
 		return err
