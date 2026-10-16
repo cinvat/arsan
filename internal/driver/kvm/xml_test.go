@@ -20,6 +20,9 @@ func TestDomainXML(t *testing.T) {
 		"<topology sockets='1' cores='2' threads='1'/>",
 		"<source file='/var/lib/libvirt/images/base.qcow2'/>",
 		"type='kvm'",
+		"<serial type='pty'>",
+		"<console type='pty'>",
+		"<target type='serial' port='0'/>",
 	} {
 		if !strings.Contains(xml, want) {
 			t.Errorf("domain xml missing %q:\n%s", want, xml)

@@ -70,6 +70,12 @@ func domainXML(name string, req core.CreateRequest) string {
       <source network='default'/>
       <model type='virtio'/>
     </interface>
+    <serial type='pty'>
+      <target port='0'/>
+    </serial>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
   </devices>
 </domain>
 `, name, req.Flavor.RAM*1024, v.Count(), pinning, topology, req.ImageRef)

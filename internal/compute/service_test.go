@@ -16,7 +16,7 @@ func (quiet) Info(string, ...any)  {}
 func (quiet) Warn(string, ...any)  {}
 func (quiet) Error(string, ...any) {}
 
-func setup(t *testing.T) (*Service, *memory.Store) {
+func setup(t *testing.T) (*Service, *memory.Store, *fake.Driver) {
 	t.Helper()
 	st := memory.New()
 	ctx := context.Background()
@@ -43,7 +43,7 @@ func setup(t *testing.T) (*Service, *memory.Store) {
 		Instances: st, Nodes: st, Scheduler: sched,
 		DriverFor: driverFor, Log: quiet{},
 	})
-	return svc, st
+	return svc, st, engine
 }
 
 func pending(t *testing.T, st *memory.Store, name string) core.Instance {
@@ -62,7 +62,7 @@ func pending(t *testing.T, st *memory.Store, name string) core.Instance {
 
 // Build places, claims, creates and starts: PENDING straight to ACTIVE.
 func TestBuildLifecycle(t *testing.T) {
-	svc, st := setup(t)
+	svc, st, _ := setup(t)
 	ctx := context.Background()
 	inst := pending(t, st, "i-1")
 
@@ -87,7 +87,7 @@ func TestBuildLifecycle(t *testing.T) {
 
 // Stop and Start move ACTIVE <-> SHUTOFF through the engine.
 func TestStopStart(t *testing.T) {
-	svc, st := setup(t)
+	svc, st, _ := setup(t)
 	ctx := context.Background()
 	inst := pending(t, st, "i-1")
 	if err := svc.Build(ctx, inst); err != nil {
@@ -111,7 +111,7 @@ func TestStopStart(t *testing.T) {
 // Delete must give the claim back. It did not: the row vanished but Available
 // never came back, so every deleted VM permanently shrank its node.
 func TestDeleteReleasesCapacity(t *testing.T) {
-	svc, st := setup(t)
+	svc, st, _ := setup(t)
 	ctx := context.Background()
 	inst := pending(t, st, "i-1")
 	if err := svc.Build(ctx, inst); err != nil {
@@ -136,9 +136,30 @@ func TestDeleteReleasesCapacity(t *testing.T) {
 	}
 }
 
+// Delete must tear the guest down on its host, not just forget the row: the
+// engine undefines the domain, so virsh list comes back empty. A guest the
+// engine no longer knows fails Start with not-found.
+func TestDeleteRemovesGuest(t *testing.T) {
+	svc, st, engine := setup(t)
+	ctx := context.Background()
+	inst := pending(t, st, "i-9")
+	if err := svc.Build(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Start(ctx, "i-9"); err != nil {
+		t.Fatalf("guest missing on engine before delete: %v", err)
+	}
+	if err := svc.Delete(ctx, "i-9"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if err := engine.Start(ctx, "i-9"); err == nil {
+		t.Fatal("engine still knows i-9 after delete: domain would linger in virsh list")
+	}
+}
+
 // A sweep retry rebuilds a stranded build instead of stranding it further.
 func TestSweepRebuildsStranded(t *testing.T) {
-	svc, st := setup(t)
+	svc, st, _ := setup(t)
 	ctx := context.Background()
 	inst := pending(t, st, "i-1")
 

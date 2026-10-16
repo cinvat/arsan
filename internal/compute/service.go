@@ -2,6 +2,7 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -63,10 +64,17 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if inst.State == core.StateActive || inst.State == core.StateBuilding {
-		// Best-effort stop before delete
-		if d, err := s.cfg.DriverFor(inst.NodeID); err == nil {
-			_ = d.Stop(ctx, id)
+	if inst.NodeID != "" {
+		// Tear the guest down on its host first. Engine Delete destroys a
+		// running domain (one that ignored ACPI shutdown included) and
+		// undefines it; a missing domain is success, so a redelivered
+		// command converges instead of wedging. Anything else fails the
+		// command and redelivers: cleaning the row while the guest lives
+		// would strand a domain no record points at.
+		if err := s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
+			return d.Delete(dctx, id)
+		}); err != nil && !errors.Is(err, core.ErrInstanceNotFound) {
+			return err
 		}
 	}
 	// The row goes away but the claim must come back first, or every deleted
