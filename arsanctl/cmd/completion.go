@@ -38,6 +38,10 @@ func completeNames(cmd *cobra.Command, args []string, _ string) ([]string, cobra
 		return noFiles()
 	}
 	c := NewClient(apiURL(cmd))
+	ns, _ := cmd.Flags().GetString("namespace")
+	if ns == "" {
+		ns = "default"
+	}
 	switch args[0] {
 	case "node", "nodes", "no":
 		nodes, err := c.GetNodes()
@@ -56,7 +60,13 @@ func completeNames(cmd *cobra.Command, args []string, _ string) ([]string, cobra
 		}
 		out := make([]string, 0, len(vms))
 		for _, vm := range vms {
-			out = append(out, vm.Name)
+			vmns := vm.Namespace
+			if vmns == "" {
+				vmns = "default"
+			}
+			if vmns == ns {
+				out = append(out, vm.Name)
+			}
 		}
 		return out, cobra.ShellCompDirectiveNoFileComp
 	case "flavor", "flavors", "fl":

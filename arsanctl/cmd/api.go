@@ -69,7 +69,6 @@ type Flavor struct {
 	Name string `json:"Name"`
 	VCPU VCPU   `json:"VCPU"`
 	RAM  int    `json:"RAM"`
-	Disk int    `json:"Disk"`
 }
 
 type Node struct {
@@ -85,13 +84,25 @@ type Node struct {
 	NotReadyReason string    `json:"NotReadyReason"`
 }
 
+// Disk mirrors the api's stored disk: name, size in MiB, optional backing.
+type Disk struct {
+	Name    string `json:"Name"`
+	Index   int    `json:"Index"`
+	SizeMiB int    `json:"SizeMiB"`
+	Image   string `json:"Image"`
+}
+
 type VirtualMachine struct {
 	ID            string `json:"ID"`
 	Name          string `json:"Name"`
+	Namespace     string `json:"Namespace"`
 	State         string `json:"State"`
 	NodeID        string `json:"NodeID"`
 	ImageRef      string `json:"ImageRef"`
 	Flavor        Flavor `json:"Flavor"`
+	Disks         []Disk `json:"Disks"`
+	CdromImage    string `json:"CdromImage"`
+	BootDevice    string `json:"BootDevice"`
 	PinnedCPUs    []int  `json:"PinnedCPUs"`
 	PendingReason string `json:"PendingReason"`
 	FailureReason string `json:"FailureReason"`
@@ -192,9 +203,17 @@ func (c *Client) GetVirtualMachines() ([]VirtualMachine, error) {
 	return out, nil
 }
 
-func (c *Client) CreateVirtualMachine(name, image, flavorRef string, flavor Flavor) (VirtualMachine, error) {
+// DiskRequest mirrors the api's disk shape; size stays a string ("50GB")
+// so the server parses and validates units in one place.
+type DiskRequest struct {
+	Name  string `json:"name" yaml:"name"`
+	Size  string `json:"size" yaml:"size"`
+	Image string `json:"image,omitempty" yaml:"image,omitempty"`
+}
+
+func (c *Client) CreateVirtualMachine(namespace, name, image, flavorRef string, flavor Flavor, disks []DiskRequest, cdrom, boot string) (VirtualMachine, error) {
 	var out VirtualMachine
-	body := map[string]any{"name": name, "image_ref": image}
+	body := map[string]any{"namespace": namespace, "name": name, "image_ref": image, "disks": disks, "cdrom_image": cdrom, "boot_device": boot}
 	if flavorRef != "" {
 		body["flavor_ref"] = flavorRef
 	} else {
@@ -204,10 +223,10 @@ func (c *Client) CreateVirtualMachine(name, image, flavorRef string, flavor Flav
 	return out, err
 }
 
-func (c *Client) CreateFlavor(name string, vcpu VCPU, memory, disk string) (Flavor, error) {
+func (c *Client) CreateFlavor(name string, vcpu VCPU, memory string) (Flavor, error) {
 	var out Flavor
 	err := c.post("/flavors", map[string]any{
-		"name": name, "vcpu": vcpu, "memory": memory, "disk": disk,
+		"name": name, "vcpu": vcpu, "memory": memory,
 	}, &out)
 	return out, err
 }
@@ -222,6 +241,26 @@ func (c *Client) GetFlavors() ([]Flavor, error) {
 
 func (c *Client) DeleteVirtualMachine(id string) error {
 	return c.delete("/virtualmachines/" + id)
+}
+
+func (c *Client) AttachDisk(id string, d DiskRequest) error {
+	return c.post("/virtualmachines/"+id+"/disks", d, nil)
+}
+
+func (c *Client) DetachDisk(id, name string) error {
+	return c.delete("/virtualmachines/" + id + "/disks/" + name)
+}
+
+func (c *Client) AttachCdrom(id, image string) error {
+	return c.post("/virtualmachines/"+id+"/cdrom", map[string]any{"image": image}, nil)
+}
+
+func (c *Client) DetachCdrom(id string) error {
+	return c.delete("/virtualmachines/" + id + "/cdrom")
+}
+
+func (c *Client) SetBootDevice(id, device string) error {
+	return c.post("/virtualmachines/"+id+"/boot", map[string]any{"device": device}, nil)
 }
 
 // snapshot mirrors one NDJSON line of a watch stream.

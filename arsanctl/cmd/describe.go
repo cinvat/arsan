@@ -23,23 +23,10 @@ var describeCmd = &cobra.Command{
 			describeNode(n)
 			return nil
 		case "virtualmachines", "virtualmachine", "vm", "vms":
-			vm, err := c.findByName(args[1])
+			ns, _ := cmd.Flags().GetString("namespace")
+			vm, err := c.findVM(ns, args[1])
 			if err != nil {
-				// A name miss may be an id: try it directly.
-				vms, lerr := c.GetVirtualMachines()
-				if lerr != nil {
-					return err
-				}
-				found := false
-				for _, v := range vms {
-					if v.ID == args[1] {
-						vm, found = v, true
-						break
-					}
-				}
-				if !found {
-					return err
-				}
+				return err
 			}
 			describeVM(vm)
 			return nil
@@ -103,12 +90,19 @@ func describeNode(n Node) {
 
 func describeVM(vm VirtualMachine) {
 	fmt.Printf("Name:     %s\n", vm.Name)
+	fmt.Printf("Namespace: %s\n", vm.Namespace)
 	fmt.Printf("ID:       %s\n", vm.ID)
 	fmt.Printf("State:    %s\n", vm.State)
 	fmt.Printf("Node:     %s\n", dash(vm.NodeID))
 	fmt.Printf("Image:    %s\n", vm.ImageRef)
-	fmt.Printf("Flavor:   %s (%s, memory %s, disk %s)\n",
-		vm.Flavor.Name, vcpuLong(vm.Flavor.VCPU), mibShort(vm.Flavor.RAM), mibShort(vm.Flavor.Disk))
+	fmt.Printf("Flavor:   %s (%s, memory %s)\n",
+		vm.Flavor.Name, vcpuLong(vm.Flavor.VCPU), mibShort(vm.Flavor.RAM))
+	for _, d := range vm.Disks {
+		fmt.Printf("Disk:     %s (%s, %s)\n", d.Name, mibShort(d.SizeMiB), dash(d.Image))
+	}
+	if vm.CdromImage != "" {
+		fmt.Printf("Cdrom:    %s (boot: %s)\n", vm.CdromImage, vm.BootDevice)
+	}
 	if len(vm.PinnedCPUs) > 0 {
 		fmt.Printf("Pinned:   %v\n", vm.PinnedCPUs)
 	}
@@ -124,7 +118,6 @@ func describeFlavor(f Flavor) {
 	fmt.Printf("Name:     %s\n", f.Name)
 	fmt.Printf("vCPU:     %s\n", vcpuLong(f.VCPU))
 	fmt.Printf("Memory:   %s\n", mibShort(f.RAM))
-	fmt.Printf("Disk:     %s\n", mibShort(f.Disk))
 }
 
 // vcpuLong spells topology out: 1 socket, 2 cores, 1 thread, shared.
@@ -144,5 +137,6 @@ func dash(s string) string {
 }
 
 func init() {
+	describeCmd.Flags().StringP("namespace", "n", "default", "namespace of the resource")
 	rootCmd.AddCommand(describeCmd)
 }

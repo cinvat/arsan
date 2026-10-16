@@ -1,0 +1,27 @@
+# Storage: extra data disks plus an optional rescue cdrom. The root disk is
+# always a thin overlay of spec.image (<namespace>-<name>-0.qcow2); extras
+# are numbered from 1. Files live next to the base image and are deleted
+# with the VM; bases and isos are shared and never removed.
+apiVersion: v1alpha1
+kind: VirtualMachine
+metadata:
+  name: db1
+  namespace: demo
+spec:
+  image: https://example.com/base.qcow2
+  flavorRef: m1.medium
+  disks:
+    - {name: data, size: 50GB}
+    - {name: logs, size: 10GB}
+---
+# Rescue: attach the iso, boot from it, start. Detach when done.
+apiVersion: v1alpha1
+kind: VirtualMachine
+metadata:
+  name: rescue1
+  namespace: demo
+spec:
+  image: https://example.com/base.qcow2
+  flavorRef: m1.small
+  cdrom: https://example.com/rescue.iso
+  boot: cdrom

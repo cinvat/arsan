@@ -3,14 +3,14 @@ kind: Flavor
 metadata:
   name: m1.small
 spec:
-  vcpu: 1
+  vcpu: {sockets: 1, cores: 1, threads: 1}
   memory: 32MB
-  disk: 10GB
 ---
 apiVersion: v1alpha1
 kind: VirtualMachine
 metadata:
   name: web1
+  namespace: demo
 spec:
   image: https://example.com/base.qcow2
   flavorRef: m1.small
@@ -19,6 +19,7 @@ apiVersion: v1alpha1
 kind: VirtualMachine
 metadata:
   name: web2
+  namespace: demo
 spec:
   image: https://example.com/base.qcow2
   flavorRef: m1.small

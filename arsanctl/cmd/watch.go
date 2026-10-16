@@ -21,7 +21,9 @@ var watchCmd = &cobra.Command{
 		case "nodes", "node", "no":
 			return watchNodes(c)
 		case "virtualmachines", "virtualmachine", "vm", "vms":
-			return watchVMs(c)
+			ns, _ := cmd.Flags().GetString("namespace")
+			all, _ := cmd.Flags().GetBool("all-namespaces")
+			return watchVMs(c, ns, all)
 		default:
 			return fmt.Errorf("only nodes or vms can be watched, got %q", args[0])
 		}
@@ -63,13 +65,15 @@ func watchNodes(c *Client) error {
 
 // watchVMs streams the server's VM snapshots the same way. It replaces the
 // old 2s re-list loop: same output shape, zero request overhead while idle.
-func watchVMs(c *Client) error {
+func watchVMs(c *Client, ns string, all bool) error {
 	return stream(c, "/virtualmachines?watch=true", func(snap snapshot) {
-		printVMs(snap.VirtualMachines)
+		printVMs(filterVMs(snap.VirtualMachines, ns, all))
 		fmt.Println("---")
 	})
 }
 
 func init() {
+	watchCmd.Flags().StringP("namespace", "n", "default", "namespace to watch")
+	watchCmd.Flags().BoolP("all-namespaces", "A", false, "watch all namespaces")
 	rootCmd.AddCommand(watchCmd)
 }

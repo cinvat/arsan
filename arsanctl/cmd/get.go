@@ -27,14 +27,16 @@ var getCmd = &cobra.Command{
 			printNodes(nodes)
 			return nil
 		case "virtualmachines", "virtualmachine", "vm", "vms":
+			ns, _ := cmd.Flags().GetString("namespace")
+			all, _ := cmd.Flags().GetBool("all-namespaces")
 			if watch {
-				return watchVMs(c)
+				return watchVMs(c, ns, all)
 			}
 			vms, err := c.GetVirtualMachines()
 			if err != nil {
 				return err
 			}
-			printVMs(vms)
+			printVMs(filterVMs(vms, ns, all))
 			return nil
 		case "flavors", "flavor", "fl":
 			flavors, err := c.GetFlavors()
@@ -58,18 +60,40 @@ func printNodes(nodes []Node) {
 }
 
 func printVMs(vms []VirtualMachine) {
-	fmt.Printf("%-16s %-10s %-10s %-10s\n", "NAME", "STATE", "NODE", "FLAVOR")
+	fmt.Printf("%-16s %-16s %-10s %-10s %-10s\n", "NAMESPACE", "NAME", "STATE", "NODE", "FLAVOR")
 	for _, vm := range vms {
-		fmt.Printf("%-16s %-10s %-10s %-10s\n",
-			vm.Name, vm.State, vm.NodeID, vm.Flavor.Name)
+		fmt.Printf("%-16s %-16s %-10s %-10s %-10s\n",
+			vm.Namespace, vm.Name, vm.State, vm.NodeID, vm.Flavor.Name)
 	}
 }
 
+// filterVMs scopes the list to one namespace, kubectl-style. Empty namespace
+// rows (pre-namespace records) read as default.
+func filterVMs(vms []VirtualMachine, ns string, all bool) []VirtualMachine {
+	if all {
+		return vms
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	out := vms[:0:0]
+	for _, vm := range vms {
+		vmns := vm.Namespace
+		if vmns == "" {
+			vmns = "default"
+		}
+		if vmns == ns {
+			out = append(out, vm)
+		}
+	}
+	return out
+}
+
 func printFlavors(flavors []Flavor) {
-	fmt.Printf("%-16s %-14s %-10s %-10s\n", "NAME", "VCPU", "MEMORY", "DISK")
+	fmt.Printf("%-16s %-14s %-10s\n", "NAME", "VCPU", "MEMORY")
 	for _, f := range flavors {
-		fmt.Printf("%-16s %-14s %-10s %-10s\n",
-			f.Name, vcpuShort(f.VCPU), mibShort(f.RAM), mibShort(f.Disk))
+		fmt.Printf("%-16s %-14s %-10s\n",
+			f.Name, vcpuShort(f.VCPU), mibShort(f.RAM))
 	}
 }
 
@@ -92,5 +116,7 @@ func mibShort(mib int) string {
 
 func init() {
 	getCmd.Flags().BoolP("watch", "w", false, "reprint when something changes")
+	getCmd.Flags().StringP("namespace", "n", "default", "namespace to list")
+	getCmd.Flags().BoolP("all-namespaces", "A", false, "list all namespaces")
 	rootCmd.AddCommand(getCmd)
 }

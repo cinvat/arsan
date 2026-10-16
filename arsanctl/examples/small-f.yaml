@@ -5,4 +5,3 @@ metadata:
 spec:
   vcpu: {sockets: 1, cores: 1, threads: 1}
   memory: 32MB
-  disk: 128MB

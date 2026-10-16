@@ -24,6 +24,7 @@ import (
 //	kind: VirtualMachine
 //	metadata:
 //	  name: web1
+//	  namespace: team-a   # optional, defaults to "default"
 //	spec:
 //	  image: https://example.com/base.qcow2   # or a host-local qcow2 path
 //	  flavorRef: m1
@@ -31,7 +32,8 @@ type manifest struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
 	Metadata   struct {
-		Name string `yaml:"name"`
+		Name      string `yaml:"name"`
+		Namespace string `yaml:"namespace"`
 	} `yaml:"metadata"`
 	Spec struct {
 		Image string `yaml:"image"`
@@ -41,7 +43,11 @@ type manifest struct {
 		Flavor Flavor `yaml:"flavor"`
 		VCPU   VCPU   `yaml:"vcpu"`
 		Memory string `yaml:"memory"`
-		Disk   string `yaml:"disk"`
+		// Disks are extra data volumes, each {name, size[, image]}.
+		Disks []DiskRequest `yaml:"disks"`
+		// Cdrom attaches an iso read-only. Boot selects disk or cdrom.
+		Cdrom string `yaml:"cdrom"`
+		Boot  string `yaml:"boot"`
 	} `yaml:"spec"`
 }
 
@@ -83,20 +89,39 @@ func loadManifests(path string) ([]manifest, error) {
 	return out, nil
 }
 
-// findByName resolves a VM name to its record. Names are unique per
-// registration in practice; the api keys rows by id, so this lists and
-// matches client-side.
-func (c *Client) findByName(name string) (VirtualMachine, error) {
+// manifestNamespace defaults an empty metadata.namespace, kubectl-style.
+func manifestNamespace(m manifest) string {
+	if m.Metadata.Namespace == "" {
+		return "default"
+	}
+	return m.Metadata.Namespace
+}
+
+// findVM resolves a VM id or name to its record. Ids match in any namespace;
+// names match within the given one, because names repeat across namespaces
+// while the api keys rows by id.
+func (c *Client) findVM(namespace, nameOrID string) (VirtualMachine, error) {
 	vms, err := c.GetVirtualMachines()
 	if err != nil {
 		return VirtualMachine{}, err
 	}
 	for _, vm := range vms {
-		if vm.Name == name {
+		if vm.ID == nameOrID {
 			return vm, nil
 		}
 	}
-	return VirtualMachine{}, fmt.Errorf("virtualmachine %q not found", name)
+	for _, vm := range vms {
+		// Rows written before namespaces existed carry "": they read as
+		// the default namespace so an upgrade does not duplicate them.
+		ns := vm.Namespace
+		if ns == "" {
+			ns = "default"
+		}
+		if ns == namespace && vm.Name == nameOrID {
+			return vm, nil
+		}
+	}
+	return VirtualMachine{}, fmt.Errorf("virtualmachine %q not found in namespace %q", nameOrID, namespace)
 }
 
 // sameSpec reports whether the live VM already matches the manifest, so apply
@@ -109,8 +134,7 @@ func sameSpec(vm VirtualMachine, m manifest) bool {
 		return vm.Flavor.Name == m.Spec.FlavorRef
 	}
 	return vm.Flavor.VCPU == m.Spec.Flavor.VCPU &&
-		vm.Flavor.RAM == m.Spec.Flavor.RAM &&
-		vm.Flavor.Disk == m.Spec.Flavor.Disk
+		vm.Flavor.RAM == m.Spec.Flavor.RAM
 }
 
 // flavorOf resolves a VM manifest to its flavor reference and legacy inline
@@ -118,8 +142,8 @@ func sameSpec(vm VirtualMachine, m manifest) bool {
 func flavorOf(m manifest) (string, Flavor) { return m.Spec.FlavorRef, m.Spec.Flavor }
 
 // flavorArgs converts a Flavor-kind manifest into create arguments.
-// Vcpu, memory and disk pass through as written: the api parses and validates
+// Vcpu and memory pass through as written: the api parses and validates
 // them, so arsanctl never duplicates the sizing logic.
-func flavorArgs(m manifest) (vcpu VCPU, memory, disk string) {
-	return m.Spec.VCPU, m.Spec.Memory, m.Spec.Disk
+func flavorArgs(m manifest) (vcpu VCPU, memory string) {
+	return m.Spec.VCPU, m.Spec.Memory
 }

@@ -2,6 +2,7 @@ apiVersion: v1alpha1
 kind: VirtualMachine
 metadata:
   name: cirros1
+  namespace: default
 spec:
-  image: https://github.com/cirros-dev/cirros/releases/download/0.6.3/cirros-0.6.3-x86_64-disk.img
+  image: /etc/arsan/images/cirros.img
   flavorRef: m1.small
