@@ -50,18 +50,18 @@ var getCmd = &cobra.Command{
 }
 
 func printNodes(nodes []Node) {
-	fmt.Printf("%-16s %-10s %-10s %-15s %s\n", "ID", "STATE", "ENGINE", "IP", "NAME")
+	fmt.Printf("%-16s %-10s %-10s %-15s\n", "NAME", "STATE", "ENGINE", "IP")
 	for _, n := range nodes {
-		fmt.Printf("%-16s %-10s %-10s %-15s %s\n",
-			n.ID, n.State, n.Driver, n.IP, n.Name)
+		fmt.Printf("%-16s %-10s %-10s %-15s\n",
+			n.Name, n.State, n.Driver, n.IP)
 	}
 }
 
 func printVMs(vms []VirtualMachine) {
-	fmt.Printf("%-16s %-10s %-10s %-10s %s\n", "ID", "STATE", "NODE", "FLAVOR", "NAME")
+	fmt.Printf("%-16s %-10s %-10s %-10s\n", "NAME", "STATE", "NODE", "FLAVOR")
 	for _, vm := range vms {
-		fmt.Printf("%-16s %-10s %-10s %-10s %s\n",
-			vm.ID, vm.State, vm.NodeID, vm.Flavor.Name, vm.Name)
+		fmt.Printf("%-16s %-10s %-10s %-10s\n",
+			vm.Name, vm.State, vm.NodeID, vm.Flavor.Name)
 	}
 }
 

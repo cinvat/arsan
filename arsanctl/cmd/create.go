@@ -37,7 +37,7 @@ var createCmd = &cobra.Command{
 				return fmt.Errorf("%s: %w", m.Metadata.Name, err)
 			}
 			// Accepted, not running: poll `arsanctl get vm` until ACTIVE.
-			fmt.Printf("virtualmachine/%s created (%s %s)\n", vm.Name, vm.ID, vm.State)
+			fmt.Printf("virtualmachine/%s created (%s)\n", vm.Name, vm.State)
 		}
 		return nil
 	},
@@ -115,7 +115,7 @@ var applyCmd = &cobra.Command{
 				if cerr != nil {
 					return fmt.Errorf("%s: %w", m.Metadata.Name, cerr)
 				}
-				fmt.Printf("virtualmachine/%s created (%s %s)\n", created.Name, created.ID, created.State)
+				fmt.Printf("virtualmachine/%s created (%s)\n", created.Name, created.State)
 				continue
 			}
 			if sameSpec(vm, m) {
@@ -129,7 +129,7 @@ var applyCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("%s: %w", m.Metadata.Name, err)
 			}
-			fmt.Printf("virtualmachine/%s recreated (%s %s): spec changed\n", created.Name, created.ID, created.State)
+			fmt.Printf("virtualmachine/%s recreated (%s): spec changed\n", created.Name, created.State)
 		}
 		return nil
 	},

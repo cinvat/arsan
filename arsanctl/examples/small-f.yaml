@@ -1,0 +1,8 @@
+apiVersion: v1alpha1
+kind: Flavor
+metadata:
+  name: m1.small
+spec:
+  vcpu: {sockets: 1, cores: 1, threads: 1}
+  memory: 32MB
+  disk: 128MB
