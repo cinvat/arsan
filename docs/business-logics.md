@@ -482,6 +482,9 @@ exactly the case that matters.
 | `instance.start` | `SHUTOFF` → build |
 | `instance.stop` | `RUNNING` → `SHUTOFF`, reservation retained |
 | `instance.migrate` | move to a named target host |
+| `instance.attach-disk` / `detach-disk` | converge one extra disk, live if running |
+| `instance.attach-cdrom` / `detach-cdrom` | converge the read-only iso, live if running |
+| `instance.set-boot` | select disk or cdrom boot; SHUTOFF only, redefines |
 | `node.reclaim` | operator-driven re-placement (drain) |
 
 ### Handler contract
@@ -632,7 +635,9 @@ tests actually protect.
 5. **Engine operations are idempotent.**
    Compute retries. `Create`, `Start`, and `Delete` are safe to call twice —
    and `Delete` must not error on an instance that is already gone, or recovery
-   becomes an infinite failure loop.
+   becomes an infinite failure loop. Storage ops are record-first with revert
+   on engine failure, and file deletion ignores missing files, so a retried
+   detach cannot strand storage nor fail on it.
 
 6. **Lost events are recoverable.**
    The queue may drop or reorder. A dropped command is corrected by the
@@ -665,7 +670,16 @@ rediscovered:
 - **Does `api` still run loops in-process?** Once the postgres store is wired,
   no. Keeping both modes invites the memory-store trap above.
 - **Flavor persistence.** *Settled: named flavors.* `POST /flavors` defines
-  immutable sizings (`vcpu` topology plus `memory`/`disk` as `32MB`/`2GB`
+  immutable sizings (`vcpu` topology plus `memory` as `32MB`/`2GB`
   quantities); `POST /virtualmachines` takes `flavor_ref` and snapshots the
   resources onto the instance, so later flavor edits never resize existing
   VMs. The legacy inline `flavor` still decodes for old clients.
+- **Storage.** *Settled: disks are per-VM, not per-flavor.* A flavor sizes
+  compute only; the VM carries `disks[]` (extra qcow2, indexed from 1), an
+  optional read-only `cdrom` iso, and a boot device. The root is always a
+  thin overlay of the image (`<ns>-<name>-0.qcow2`) provisioned next to its
+  base at build; extras are blank or overlays of their own base. The domain
+  XML lists every owned file in metadata, and Delete removes exactly those —
+  bases and isos are shared and never removed. Exactly one device boots
+  (selectable while SHUTOFF); attach/detach works live on a running guest
+  through `virDomainAttachDevice`, mirroring KubeVirt's hotplug semantics.
