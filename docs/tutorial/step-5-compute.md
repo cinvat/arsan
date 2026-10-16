@@ -77,7 +77,7 @@ func (s *Service) List(ctx context.Context) ([]core.Instance, error) {
 func (s *Service) Delete(ctx context.Context, id string) error {
 	inst, err := s.cfg.Instances.Get(ctx, id)
 	if err != nil { return err }
-	if inst.State == core.StateActive || inst.State == core.StateBuilding {
+	if inst.State == core.StateRunning || inst.State == core.StateBuilding {
 		// Best-effort stop before delete
 		_ = s.cfg.DriverFor(inst.NodeID)
 	}
@@ -94,7 +94,7 @@ func (s *Service) Start(ctx context.Context, id string) error {
 func (s *Service) Stop(ctx context.Context, id string) error {
 	inst, err := s.cfg.Instances.Get(ctx, id)
 	if err != nil { return err }
-	if inst.State != core.StateActive { return fmt.Errorf("stop: %w", core.ErrInvalidTransition) }
+	if inst.State != core.StateRunning { return fmt.Errorf("stop: %w", core.ErrInvalidTransition) }
 
 	d, err := s.cfg.DriverFor(inst.NodeID)
 	if err != nil { return err }
@@ -102,14 +102,14 @@ func (s *Service) Stop(ctx context.Context, id string) error {
 	defer cancel()
 	if err := d.Stop(dctx, id); err != nil { return err }
 
-	_, err = s.cfg.Instances.Transition(ctx, id, core.StateActive, core.StateShutoff)
+	_, err = s.cfg.Instances.Transition(ctx, id, core.StateRunning, core.StateShutoff)
 	return err
 }
 
 func (s *Service) Migrate(ctx context.Context, id, targetNodeID string) error {
 	inst, err := s.cfg.Instances.Get(ctx, id)
 	if err != nil { return err }
-	if inst.State != core.StateActive { return fmt.Errorf("migrate: %w", core.ErrInvalidTransition) }
+	if inst.State != core.StateRunning { return fmt.Errorf("migrate: %w", core.ErrInvalidTransition) }
 
 	d, err := s.cfg.DriverFor(inst.NodeID)
 	if err != nil { return err }
@@ -162,8 +162,8 @@ func (s *Service) build(ctx context.Context, id string) error {
 	// 5. Driver Start
 	if err := d.Start(dctx, id); err != nil { return s.fail(ctx, id, core.StateBuilding, err) }
 
-	// 6. CAS BUILDING -> ACTIVE
-	_, err = s.cfg.Instances.Transition(ctx, id, core.StateBuilding, core.StateActive)
+	// 6. CAS BUILDING -> RUNNING
+	_, err = s.cfg.Instances.Transition(ctx, id, core.StateBuilding, core.StateRunning)
 	return err
 }
 
@@ -235,7 +235,7 @@ func (s *Service) Reconcile(ctx context.Context) error {
 
 ### State Machine Transitions
 ```
-PENDING --schedule ok--> SCHEDULING --claim ok--> BUILDING --start ok--> ACTIVE
+PENDING --schedule ok--> SCHEDULING --claim ok--> BUILDING --start ok--> RUNNING
     |                         |                        |                |
     | no host                 | claim lost             | driver fail    | stop
     v                         v                        v                v
@@ -334,7 +334,7 @@ func TestBuildLifecycle(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 	got, _ := st.Get(context.Background(), "i-1")
-	if got.State != core.StateActive { t.Fatalf("state = %s, want ACTIVE", got.State) }
+	if got.State != core.StateRunning { t.Fatalf("state = %s, want RUNNING", got.State) }
 }
 
 func TestDeleteReleasesCapacity(t *testing.T) {
@@ -349,15 +349,15 @@ func TestDeleteReleasesCapacity(t *testing.T) {
 
 func TestStopStart(t *testing.T) {
 	svc, st := setup(t)
-	// ... build i-1 to ACTIVE as above, then:
+	// ... build i-1 to RUNNING as above, then:
 	if err := svc.Stop(context.Background(), "i-1"); err != nil { t.Fatal(err) }
 	if got, _ := st.Get(context.Background(), "i-1"); got.State != core.StateShutoff {
 		t.Fatalf("state = %s, want SHUTOFF", got.State)
 	}
 	// Starting boots the VM where it already lives; it must not reschedule.
 	if err := svc.Start(context.Background(), "i-1"); err != nil { t.Fatal(err) }
-	if got, _ := st.Get(context.Background(), "i-1"); got.State != core.StateActive {
-		t.Fatalf("state = %s, want ACTIVE", got.State)
+	if got, _ := st.Get(context.Background(), "i-1"); got.State != core.StateRunning {
+		t.Fatalf("state = %s, want RUNNING", got.State)
 	}
 }
 

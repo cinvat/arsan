@@ -29,7 +29,7 @@ const (
 	StatePending    InstanceState = "PENDING"
 	StateScheduling InstanceState = "SCHEDULING"
 	StateBuilding   InstanceState = "BUILDING"
-	StateActive     InstanceState = "ACTIVE"
+	StateRunning     InstanceState = "RUNNING"
 	StateShutoff    InstanceState = "SHUTOFF"
 	StateError      InstanceState = "ERROR"
 )

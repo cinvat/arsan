@@ -324,7 +324,7 @@ func TestReserveNoOvercommit(t *testing.T) {
 
 func TestTransitionRejectsWrongFrom(t *testing.T) {
 	s := New()
-	s.instances["i1"] = core.Instance{ID: "i1", State: core.StateActive}
+	s.instances["i1"] = core.Instance{ID: "i1", State: core.StateRunning}
 	_, err := s.Transition(context.Background(), "i1", core.StatePending, core.StateBuilding)
 	if err == nil || !errors.Is(err, core.ErrInvalidTransition) {
 		t.Fatalf("expected ErrInvalidTransition, got %v", err)

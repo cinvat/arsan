@@ -406,7 +406,7 @@ POST /v1alpha1/virtualmachines
         ▼  yes
   schedule → claim → Transition(SCHEDULING)
         → engine Create → Transition(BUILDING)
-        → engine Start → Transition(ACTIVE)
+        → engine Start → Transition(RUNNING)
         │
         └── Ack                                      ← retires the command
 ```
@@ -426,6 +426,34 @@ this host?" is answerable from the record alone.
 The api must not expose a placement endpoint that calls the scheduler. A GET
 that recomputes is a GET with side effects, and one whose answer may differ from
 the decision that was actually applied.
+
+### Instance states
+
+States are split by who owns them. The control plane owns `PENDING`,
+`SCHEDULING`, `BUILDING` and `ERROR`; the hypervisor owns `RUNNING`,
+`SHUTOFF`, `SHUTDOWN`, `PAUSED` and `CRASHED`. The guest names mirror
+libvirt's `virDomainState` one-for-one, except `BLOCKED` (folds into
+`RUNNING` — it is running but waiting on I/O) and `PMSUSPENDED` (folds into
+`PAUSED`), which are too fine to act on, and `NOSTATE`, which is never
+stored: it means libvirt itself does not know.
+
+A placement failure queues instead of erroring. The VM stays `PENDING` with
+`PendingReason` naming the wait ("no valid node (rejected by: Capacity…)"),
+the generation counts attempts, and the sweep retries. `ERROR` with
+`FailureReason` is reserved for control-plane failures. A pending VM never
+looks broken and a broken one never looks merely queued — the kubectl pod
+analogy, where unschedulable is `Pending`, not `Failed`.
+
+Observed state converges on every passing probe: the controller lists the
+engine's domains and transitions steady records toward them, so a `virsh
+destroy` behind arsan's back flips `RUNNING` to `SHUTOFF` within one probe
+interval. Only steady states move, and only between steady states; `PENDING`,
+`SCHEDULING`, `BUILDING` and `ERROR` belong to whoever put the record there,
+and hand-made domains (no record) are ignored. Absence is also an answer —
+the probe just round-tripped that engine — except when the listing itself
+fails, which converges nothing rather than mass-shutting-off on a partial
+answer. A lost compare-and-swap is skipped, not forced: whoever moved the
+record holds the newer truth.
 
 ### The bus is NATS JetStream
 
@@ -452,7 +480,7 @@ exactly the case that matters.
 | `instance.create` | build an instance the api has persisted as `PENDING` |
 | `instance.delete` | tear down, then release the reservation |
 | `instance.start` | `SHUTOFF` → build |
-| `instance.stop` | `ACTIVE` → `SHUTOFF`, reservation retained |
+| `instance.stop` | `RUNNING` → `SHUTOFF`, reservation retained |
 | `instance.migrate` | move to a named target host |
 | `node.reclaim` | operator-driven re-placement (drain) |
 
@@ -590,9 +618,11 @@ tests actually protect.
    `ReserveNodeResources` checks every dimension before mutating any. Two
    requests that each fit in vCPU but neither in RAM must both fail.
 
-3. **A failed re-placement leaves the instance `PENDING` with a bumped
-   generation.** That marker is what `Reconcile` retries on. Without it, a
-   transient cluster-wide shortage strands the VM permanently.
+3. **A failed placement leaves the instance `PENDING` with a reason and a
+   bumped generation.** That marker is what `Reconcile` retries on, and the
+   reason is what an operator reads instead of guessing. Without it, a
+   transient cluster-wide shortage strands the VM permanently — and without
+   the reason, visibly queued work looks broken.
 
 4. **Sentinel errors survive every layer.**
    `ErrNoValidNode`, `ErrCapacityConflict`, `ErrInstanceNotFound` must stay
@@ -634,6 +664,8 @@ rediscovered:
   this design exists to avoid.
 - **Does `api` still run loops in-process?** Once the postgres store is wired,
   no. Keeping both modes invites the memory-store trap above.
-- **Flavor persistence.** Flavors are currently passed inline on
-  `POST /virtualmachines`. A `flavors` table with named references would make them
-  shareable and versionable; the API is already the right place for it.
+- **Flavor persistence.** *Settled: named flavors.* `POST /flavors` defines
+  immutable sizings (`vcpu` topology plus `memory`/`disk` as `32MB`/`2GB`
+  quantities); `POST /virtualmachines` takes `flavor_ref` and snapshots the
+  resources onto the instance, so later flavor edits never resize existing
+  VMs. The legacy inline `flavor` still decodes for old clients.

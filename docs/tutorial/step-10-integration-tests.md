@@ -144,7 +144,7 @@ func TestCreateReachesActive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != core.StateActive { t.Fatalf("stuck at %s", got.State) }
+	if got.State != core.StateRunning { t.Fatalf("stuck at %s", got.State) }
 	if got.NodeID == "" { t.Fatal("no node_id assigned") }
 }
 ```
@@ -156,7 +156,7 @@ func TestCreateReachesActive(t *testing.T) {
 There is no such test. Host-failure recovery was removed with HandleNodeDown:
 it never ran and its body was broken. When it comes back — probably fired by
 the probe, generation-aware — this is where its test goes: build on n1, fail
-the probe, assert the instance comes back ACTIVE on n2 with a bumped
+the probe, assert the instance comes back RUNNING on n2 with a bumped
 generation.
 
 ---
@@ -221,9 +221,9 @@ func TestConcurrentCreatesRespectCapacity(t *testing.T) {
 	h.registerNode(t, "compute-1", 2, 4, 20) // Exactly 2 x 1vcpu
 
 	// Ten builds race for room for two. The losers fail at the atomic claim,
-	// so exactly two come out ACTIVE and the rest ERROR with nothing held.
+	// so exactly two come out RUNNING and the rest stay PENDING with nothing held.
 	var wg sync.WaitGroup
-	var active atomic.Int32
+	var running atomic.Int32
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -232,14 +232,14 @@ func TestConcurrentCreatesRespectCapacity(t *testing.T) {
 			if err != nil {
 				return
 			}
-			if got, _ := h.store.Get(h.ctx, inst.ID); got.State == core.StateActive {
-				active.Add(1)
+			if got, _ := h.store.Get(h.ctx, inst.ID); got.State == core.StateRunning {
+				running.Add(1)
 			}
 		}(i)
 	}
 	wg.Wait()
 
-	if active.Load() != 2 { t.Fatalf("expected exactly 2 ACTIVE, got %d", active.Load()) }
+	if running.Load() != 2 { t.Fatalf("expected exactly 2 RUNNING, got %d", running.Load()) }
 	n, _ := h.store.GetNode(h.ctx, "n-compute-1")
 	if n.Available.VCPU != 0 {
 		t.Fatalf("available = %+v, want exactly exhausted", n.Available)
@@ -273,7 +273,7 @@ func TestSweepRebuildsStranded(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := h.store.Get(h.ctx, inst.ID)
-	if got.State != core.StateActive { t.Fatalf("state = %s, want ACTIVE", got.State) }
+	if got.State != core.StateRunning { t.Fatalf("state = %s, want RUNNING", got.State) }
 }
 ```
 
@@ -299,7 +299,7 @@ go test -race ./test/integration/...
 | `TestInstanceReplacedOnNodeDown` | Dead host VMs come back elsewhere |
 | `TestDrainMovesInstancesOff` | Drain evacuates VMs |
 | `TestDriverFailureReleasesReservation` | Build failure returns capacity |
-| `TestConcurrentCreatesRespectCapacity` | 10 concurrent, room for 2 → exactly 2 ACTIVE |
+| `TestConcurrentCreatesRespectCapacity` | 10 concurrent, room for 2 → exactly 2 RUNNING |
 | `TestReplacedAfterTransientReplacementFailure` | Transient cluster shortage doesn't strand VM |
 
 ---

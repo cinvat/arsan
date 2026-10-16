@@ -353,7 +353,7 @@ curl -sX POST localhost:8080/virtualmachines \
   -H 'content-type: application/json' \
   -d '{"name":"web-1","image_ref":"cirros","flavor":{"name":"m1.small","vcpu":1,"ram":2,"disk":10}}'
 
-# Poll until ACTIVE
+# Poll until RUNNING
 curl -s localhost:8080/virtualmachines/i-abc123 | jq '{id,name,state,node_id,generation}'
 
 # Stop/Start

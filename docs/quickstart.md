@@ -37,7 +37,7 @@ you ──POST /v1alpha1/virtualmachines──▶ api
 api: validate → write PENDING → publish instance.create → 202 ("queued", not running)
 controller: filter (READY+enabled → capacity → arch) → weigh → claim (atomic)
   → NATS create → agent's engine defines the domain
-  → NATS start → boots it → ACTIVE
+  → NATS start → boots it → RUNNING
 ```
 
 ```sh
@@ -56,7 +56,7 @@ sweep resets it to PENDING and re-drives the build itself.
 
 ```
 stop/start/delete/migrate → api validates → command on the bus → 202
-controller: compare-and-swap the state (ACTIVE→SHUTOFF, …) → NATS op → agent's engine
+controller: compare-and-swap the state (RUNNING→SHUTOFF, …) → NATS op → agent's engine
 ```
 
 Delete releases the reservation before removing the row, so capacity comes
