@@ -547,8 +547,24 @@ func (s *Store) CreateFlavor(ctx context.Context, f core.Flavor) (core.Flavor, e
 	if f.RAM <= 0 {
 		return core.Flavor{}, fmt.Errorf("flavor must have positive ram: %w", core.ErrInvalidRequest)
 	}
+	// Check-then-insert, mirroring the memory store: a duplicate create is a
+	// 400, not a 500 leaking a sqlite UNIQUE constraint. The race this opens
+	// is acceptable for flavors — rare admin writes, and the loser still gets
+	// a clean error rather than a half-written row.
+	var existing flavorRow
+	if err := s.withTimeout(ctx).First(&existing, "name = ?", f.Name).Error; err == nil {
+		return core.Flavor{}, fmt.Errorf("flavor %s exists: %w", f.Name, core.ErrInvalidRequest)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return core.Flavor{}, fmt.Errorf("create flavor %s: %w", f.Name, err)
+	}
 	row := fromFlavor(f)
 	if err := s.withTimeout(ctx).Create(&row).Error; err != nil {
+		// A lost race still lands here; re-checking turns any dialect's
+		// unique violation into the same clean "exists" error.
+		var now flavorRow
+		if ferr := s.withTimeout(ctx).First(&now, "name = ?", f.Name).Error; ferr == nil {
+			return core.Flavor{}, fmt.Errorf("flavor %s exists: %w", f.Name, core.ErrInvalidRequest)
+		}
 		return core.Flavor{}, fmt.Errorf("create flavor %s: %w", f.Name, err)
 	}
 	return f, nil
