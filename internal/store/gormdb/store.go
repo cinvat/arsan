@@ -112,6 +112,7 @@ type instanceRow struct {
 	State           string `gorm:"size:32;index"`
 	NodeID          string `gorm:"size:64;index"`
 	Generation      int
+	PendingReason   string `gorm:"size:1024"`
 	FailureReason   string `gorm:"size:1024"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
@@ -212,6 +213,7 @@ func toInstance(r instanceRow) core.Instance {
 		State:         core.InstanceState(r.State),
 		NodeID:        r.NodeID,
 		Generation:    r.Generation,
+		PendingReason: r.PendingReason,
 		FailureReason: r.FailureReason,
 		CreatedAt:     r.CreatedAt,
 		UpdatedAt:     r.UpdatedAt,
@@ -235,6 +237,7 @@ func fromInstance(i core.Instance) instanceRow {
 		State:           string(i.State),
 		NodeID:          i.NodeID,
 		Generation:      i.Generation,
+		PendingReason:   i.PendingReason,
 		FailureReason:   i.FailureReason,
 		CreatedAt:       i.CreatedAt,
 		UpdatedAt:       i.UpdatedAt,

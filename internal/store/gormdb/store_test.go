@@ -47,6 +47,28 @@ func mustInstance(t *testing.T, s *Store, id string, state core.InstanceState) c
 	return i
 }
 
+// PendingReason and FailureReason survive the round trip: they are the
+// operator's only account of why a VM waits or died.
+func TestInstanceReasonsRoundTrip(t *testing.T) {
+	s := newStore(t)
+	inst := mustInstance(t, s, "i-1", core.StatePending)
+	inst.PendingReason = "attempt 1: no valid node (rejected by: Capacity dropped 1)"
+	inst.FailureReason = "build: dial: connection refused"
+	if _, err := s.Update(t.Context(), inst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(t.Context(), "i-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PendingReason != inst.PendingReason {
+		t.Fatalf("pending reason = %q, want %q", got.PendingReason, inst.PendingReason)
+	}
+	if got.FailureReason != inst.FailureReason {
+		t.Fatalf("failure reason = %q, want %q", got.FailureReason, inst.FailureReason)
+	}
+}
+
 // --- transitions ---------------------------------------------------------
 
 func TestTransitionMovesState(t *testing.T) {
@@ -66,7 +88,7 @@ func TestTransitionMovesState(t *testing.T) {
 // must be refused, not silently applied.
 func TestTransitionRejectsWrongFrom(t *testing.T) {
 	s := newStore(t)
-	mustInstance(t, s, "i-1", core.StateActive)
+	mustInstance(t, s, "i-1", core.StateRunning)
 
 	_, err := s.Transition(t.Context(), "i-1", core.StatePending, core.StateBuilding)
 	if !errors.Is(err, core.ErrInvalidTransition) {
@@ -78,14 +100,14 @@ func TestTransitionRejectsWrongFrom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != core.StateActive {
-		t.Fatalf("state = %q, want it unchanged at ACTIVE", got.State)
+	if got.State != core.StateRunning {
+		t.Fatalf("state = %q, want it unchanged at RUNNING", got.State)
 	}
 }
 
 func TestTransitionMissingInstance(t *testing.T) {
 	s := newStore(t)
-	_, err := s.Transition(t.Context(), "nope", core.StatePending, core.StateActive)
+	_, err := s.Transition(t.Context(), "nope", core.StatePending, core.StateRunning)
 	if !errors.Is(err, core.ErrInstanceNotFound) {
 		t.Fatalf("got %v, want ErrInstanceNotFound", err)
 	}
@@ -94,7 +116,7 @@ func TestTransitionMissingInstance(t *testing.T) {
 // Update must not be a back door around Transition.
 func TestUpdateRefusesToChangeState(t *testing.T) {
 	s := newStore(t)
-	inst := mustInstance(t, s, "i-1", core.StateActive)
+	inst := mustInstance(t, s, "i-1", core.StateRunning)
 
 	inst.State = core.StateError
 	if _, err := s.Update(t.Context(), inst); !errors.Is(err, core.ErrInvalidTransition) {
@@ -104,7 +126,7 @@ func TestUpdateRefusesToChangeState(t *testing.T) {
 
 func TestUpdateAllowsMetadata(t *testing.T) {
 	s := newStore(t)
-	inst := mustInstance(t, s, "i-1", core.StateActive)
+	inst := mustInstance(t, s, "i-1", core.StateRunning)
 
 	inst.NodeID = "n-1"
 	inst.Generation = 3
@@ -236,7 +258,7 @@ func TestReleaseReturnsCapacityAndClampsToTotal(t *testing.T) {
 func TestReleaseReservationsIsIdempotent(t *testing.T) {
 	s := newStore(t)
 	mustNode(t, s, "n-1", core.Resources{CPU: 4, RAM: 8, Disk: 40})
-	mustInstance(t, s, "i-1", core.StateActive)
+	mustInstance(t, s, "i-1", core.StateRunning)
 
 	for i := 0; i < 3; i++ {
 		if err := s.ReleaseReservations(t.Context(), "i-1", "n-1"); err != nil {
