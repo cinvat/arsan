@@ -27,6 +27,10 @@ const (
 	StatePaused     InstanceState = "PAUSED"
 	StateCrashed    InstanceState = "CRASHED"
 	StateError      InstanceState = "ERROR"
+	// TERMINATING is the delete in progress: the api marks it synchronously
+	// so the intent is visible even when the agent is unreachable, and the
+	// controller tears down asynchronously until the row can go away.
+	StateTerminating InstanceState = "TERMINATING"
 )
 
 // Steady reports whether the state is a settled guest state. Only steady
