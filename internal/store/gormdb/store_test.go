@@ -39,7 +39,7 @@ func mustInstance(t *testing.T, s *Store, id string, state core.InstanceState) c
 	t.Helper()
 	i, err := s.Create(t.Context(), core.Instance{
 		ID: id, Name: id, State: state,
-		Flavor: core.Flavor{Name: "m1.small", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
+		Flavor: core.Flavor{Name: "m1.small", VCPU: core.VCPUCount(1), RAM: 2},
 	})
 	if err != nil {
 		t.Fatalf("create %s: %v", id, err)
@@ -66,6 +66,30 @@ func TestInstanceReasonsRoundTrip(t *testing.T) {
 	}
 	if got.FailureReason != inst.FailureReason {
 		t.Fatalf("failure reason = %q, want %q", got.FailureReason, inst.FailureReason)
+	}
+}
+
+// Disks, cdrom and boot device round-trip with the instance: the record is
+// the whole truth the engine re-renders from.
+func TestInstanceDisksRoundTrip(t *testing.T) {
+	s := newStore(t)
+	inst := mustInstance(t, s, "i-1", core.StatePending)
+	var err error
+	inst.Disks = []core.Disk{{Name: "data", Index: 1, SizeMiB: 50 * 1024}}
+	inst.CdromImage = "/images/rescue.iso"
+	inst.BootDevice = core.BootCDROM
+	if inst, err = s.Update(t.Context(), inst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(t.Context(), "i-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Disks) != 1 || got.Disks[0] != inst.Disks[0] {
+		t.Fatalf("disks = %+v, want %+v", got.Disks, inst.Disks)
+	}
+	if got.CdromImage != inst.CdromImage || got.BootDevice != inst.BootDevice {
+		t.Fatalf("cdrom = %q boot = %q", got.CdromImage, got.BootDevice)
 	}
 }
 

@@ -27,6 +27,7 @@ package gormdb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -99,6 +100,7 @@ func clampAdd(column, ceiling string, delta int) clause.Expr {
 type instanceRow struct {
 	ID              string `gorm:"primaryKey;size:64"`
 	Name            string `gorm:"size:255;index"`
+	Namespace       string `gorm:"size:63;index"`
 	FlavorName      string `gorm:"size:64"`
 	FlavorVCPU      int    `gorm:"column:flavor_vcpu"` // legacy count; topology columns below are canonical
 	FlavorSockets   int    `gorm:"column:flavor_sockets"`
@@ -108,6 +110,9 @@ type instanceRow struct {
 	FlavorRAM       int    `gorm:"column:flavor_ram"`
 	FlavorDisk      int    `gorm:"column:flavor_disk"`
 	PinnedCPUs      string `gorm:"column:pinned_cpus;type:text"` // comma-separated, dedicated only
+	DisksJSON       string `gorm:"column:disks_json;type:text"`   // extra data disks, JSON
+	CdromImage      string `gorm:"size:512"`
+	BootDevice      string `gorm:"size:16"`
 	ImageRef        string `gorm:"size:512"`
 	State           string `gorm:"size:32;index"`
 	NodeID          string `gorm:"size:64;index"`
@@ -169,7 +174,7 @@ func toFlavor(r flavorRow) core.Flavor {
 	if vcpu.Count() <= 0 && r.VCPU > 0 {
 		vcpu = core.VCPUCount(r.VCPU)
 	}
-	return core.Flavor{Name: r.Name, VCPU: vcpu, RAM: r.RAM, Disk: r.Disk}
+	return core.Flavor{Name: r.Name, VCPU: vcpu, RAM: r.RAM}
 }
 
 func fromFlavor(f core.Flavor) flavorRow {
@@ -177,7 +182,7 @@ func fromFlavor(f core.Flavor) flavorRow {
 		Name: f.Name, VCPU: f.VCPU.Count(),
 		Sockets: f.VCPU.Sockets, Cores: f.VCPU.Cores,
 		Threads: f.VCPU.Threads, Dedicated: f.VCPU.Dedicated,
-		RAM: f.RAM, Disk: f.Disk,
+		RAM: f.RAM,
 	}
 }
 
@@ -207,8 +212,12 @@ func toInstance(r instanceRow) core.Instance {
 	return core.Instance{
 		ID:            r.ID,
 		Name:          r.Name,
-		Flavor:        core.Flavor{Name: r.FlavorName, VCPU: vcpu, RAM: r.FlavorRAM, Disk: r.FlavorDisk},
+		Namespace:     r.Namespace,
+		Flavor:        core.Flavor{Name: r.FlavorName, VCPU: vcpu, RAM: r.FlavorRAM},
 		PinnedCPUs:    splitInts(r.PinnedCPUs),
+		Disks:         decodeDisks(r.DisksJSON),
+		CdromImage:    r.CdromImage,
+		BootDevice:    r.BootDevice,
 		ImageRef:      r.ImageRef,
 		State:         core.InstanceState(r.State),
 		NodeID:        r.NodeID,
@@ -224,6 +233,7 @@ func fromInstance(i core.Instance) instanceRow {
 	return instanceRow{
 		ID:              i.ID,
 		Name:            i.Name,
+		Namespace:       i.Namespace,
 		FlavorName:      i.Flavor.Name,
 		FlavorVCPU:      i.Flavor.VCPU.Count(),
 		FlavorSockets:   i.Flavor.VCPU.Sockets,
@@ -231,8 +241,10 @@ func fromInstance(i core.Instance) instanceRow {
 		FlavorThreads:   i.Flavor.VCPU.Threads,
 		FlavorDedicated: i.Flavor.VCPU.Dedicated,
 		FlavorRAM:       i.Flavor.RAM,
-		FlavorDisk:      i.Flavor.Disk,
 		PinnedCPUs:      joinInts(i.PinnedCPUs),
+		DisksJSON:       encodeDisks(i.Disks),
+		CdromImage:      i.CdromImage,
+		BootDevice:      i.BootDevice,
 		ImageRef:        i.ImageRef,
 		State:           string(i.State),
 		NodeID:          i.NodeID,
@@ -313,6 +325,32 @@ func joinInts(nums []int) string {
 		parts = append(parts, strconv.Itoa(n))
 	}
 	return strings.Join(parts, ",")
+}
+
+// encodeDisks/decodeDisks persist the extra data disks as one JSON document.
+// A list that only ever travels whole (read, modified, written back) does not
+// earn a join table; the failure mode of a corrupt document is "no extra
+// disks", never a half-attached one.
+func encodeDisks(disks []core.Disk) string {
+	if len(disks) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(disks)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func decodeDisks(s string) []core.Disk {
+	if s == "" {
+		return nil
+	}
+	var out []core.Disk
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 func splitInts(s string) []int {

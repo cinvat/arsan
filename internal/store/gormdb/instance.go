@@ -142,10 +142,14 @@ func (s *Store) ReleaseReservations(ctx context.Context, instanceID, nodeID stri
 		if count <= 0 {
 			count = inst.FlavorVCPU
 		}
+		disk := 0
+		for _, d := range decodeDisks(inst.DisksJSON) {
+			disk += d.SizeMiB
+		}
 		updates := map[string]any{
 			"available_vcpu": clampAdd("available_vcpu", "total_vcpu", count),
 			"available_ram":  clampAdd("available_ram", "total_ram", inst.FlavorRAM),
-			"available_disk": clampAdd("available_disk", "total_disk", inst.FlavorDisk),
+			"available_disk": clampAdd("available_disk", "total_disk", disk),
 			"updated_at":     time.Now().UTC(),
 		}
 		// Free the instance's exclusive CPUs alongside its count. The pins
@@ -539,8 +543,8 @@ func (s *Store) CreateFlavor(ctx context.Context, f core.Flavor) (core.Flavor, e
 	if err := f.VCPU.Validate(); err != nil {
 		return core.Flavor{}, err
 	}
-	if f.RAM <= 0 || f.Disk <= 0 {
-		return core.Flavor{}, fmt.Errorf("flavor must have positive ram and disk: %w", core.ErrInvalidRequest)
+	if f.RAM <= 0 {
+		return core.Flavor{}, fmt.Errorf("flavor must have positive ram: %w", core.ErrInvalidRequest)
 	}
 	row := fromFlavor(f)
 	if err := s.withTimeout(ctx).Create(&row).Error; err != nil {

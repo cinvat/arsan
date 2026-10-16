@@ -38,8 +38,8 @@ func (s *Store) CreateFlavor(ctx context.Context, f core.Flavor) (core.Flavor, e
 	if err := f.VCPU.Validate(); err != nil {
 		return core.Flavor{}, err
 	}
-	if f.RAM <= 0 || f.Disk <= 0 {
-		return core.Flavor{}, fmt.Errorf("flavor must have positive ram and disk: %w", core.ErrInvalidRequest)
+	if f.RAM <= 0 {
+		return core.Flavor{}, fmt.Errorf("flavor must have positive ram: %w", core.ErrInvalidRequest)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,7 +194,7 @@ func (s *Store) ReleaseReservations(ctx context.Context, instanceID, nodeID stri
 	if !ok {
 		return nil
 	}
-	n.Available = n.Available.AddCapped(i.Flavor.Resources(), n.Total)
+	n.Available = n.Available.AddCapped(i.Flavor.Resources().Add(core.DiskResources(i.Disks)), n.Total)
 	// Free the instance's exclusive CPUs, if it held any. Count restoration
 	// above and pin release here are the two halves of one teardown; the
 	// instance record carries the pins so a retry frees exactly what was held.
