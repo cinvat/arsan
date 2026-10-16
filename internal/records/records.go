@@ -91,7 +91,7 @@ type Flavors struct {
 }
 
 func (s *Flavors) Create(ctx context.Context, req core.CreateFlavorRequest) (core.Flavor, error) {
-	return s.Store.CreateFlavor(ctx, core.Flavor{Name: req.Name, VCPU: req.VCPU, RAM: req.Memory.MiB(), Disk: req.Disk.MiB()})
+	return s.Store.CreateFlavor(ctx, core.Flavor{Name: req.Name, VCPU: req.VCPU, RAM: req.Memory.MiB()})
 }
 
 func (s *Flavors) Get(ctx context.Context, name string) (core.Flavor, error) {
@@ -104,6 +104,30 @@ func (s *Flavors) List(ctx context.Context) ([]core.Flavor, error) {
 
 func (s *Flavors) Delete(ctx context.Context, name string) error {
 	return s.Store.DeleteFlavor(ctx, name)
+}
+
+// resolveDisks validates extra disk requests and assigns stable file indexes
+// starting at 1 (0 is the root overlay). Names are DNS labels, unique per VM,
+// sizes positive.
+func resolveDisks(req []core.CreateDiskRequest) ([]core.Disk, error) {
+	seen := make(map[string]bool, len(req))
+	out := make([]core.Disk, 0, len(req))
+	for i, d := range req {
+		if err := core.ValidateName(d.Name); err != nil {
+			return nil, fmt.Errorf("disk %d: %w", i, err)
+		}
+		if seen[d.Name] {
+			return nil, fmt.Errorf("disk %q: duplicate name: %w", d.Name, core.ErrInvalidRequest)
+		}
+		seen[d.Name] = true
+		if d.Size.MiB() <= 0 {
+			return nil, fmt.Errorf("disk %q: size is required (e.g. \"50GB\"): %w", d.Name, core.ErrInvalidRequest)
+		}
+		out = append(out, core.Disk{
+			Name: d.Name, Index: i + 1, SizeMiB: d.Size.MiB(), Image: d.Image,
+		})
+	}
+	return out, nil
 }
 
 // Instances implements core.InstanceService over an instance store and the bus.
@@ -123,11 +147,29 @@ type Instances struct {
 // the record stays PENDING and the reconciliation sweep picks it up, so the
 // caller is told the truth either way.
 func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) (core.Instance, error) {
-	if req.Name == "" {
-		return core.Instance{}, fmt.Errorf("name required: %w", core.ErrInvalidRequest)
+	if err := core.ValidateName(req.Name); err != nil {
+		return core.Instance{}, err
+	}
+	if req.Namespace == "" {
+		req.Namespace = core.DefaultNamespace
+	}
+	if err := core.ValidateNamespace(req.Namespace); err != nil {
+		return core.Instance{}, err
 	}
 	if req.ImageRef == "" {
 		return core.Instance{}, fmt.Errorf("image_ref required: %w", core.ErrInvalidRequest)
+	}
+	// Names are unique per namespace: two VMs cannot share a hypervisor
+	// domain name, and the domain name is namespace-name.
+	existing, err := s.Store.List(ctx)
+	if err != nil {
+		return core.Instance{}, err
+	}
+	for _, e := range existing {
+		if e.Namespace == req.Namespace && e.Name == req.Name {
+			return core.Instance{}, fmt.Errorf("virtualmachine %s/%s exists: %w",
+				req.Namespace, req.Name, core.ErrInvalidRequest)
+		}
 	}
 	flavor := req.Flavor
 	if req.FlavorRef != "" {
@@ -143,19 +185,37 @@ func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) 
 	if err := flavor.VCPU.Validate(); err != nil {
 		return core.Instance{}, err
 	}
-	if flavor.RAM <= 0 || flavor.Disk <= 0 {
-		return core.Instance{}, fmt.Errorf("flavor must have positive ram and disk: %w", core.ErrInvalidRequest)
+	if flavor.RAM <= 0 {
+		return core.Instance{}, fmt.Errorf("flavor must have positive ram: %w", core.ErrInvalidRequest)
+	}
+	disks, err := resolveDisks(req.Disks)
+	if err != nil {
+		return core.Instance{}, err
+	}
+	boot := req.BootDevice
+	if boot == "" {
+		boot = core.BootDisk
+	}
+	if boot != core.BootDisk && boot != core.BootCDROM {
+		return core.Instance{}, fmt.Errorf("boot_device %q: want disk or cdrom: %w", req.BootDevice, core.ErrInvalidRequest)
+	}
+	if boot == core.BootCDROM && req.CdromImage == "" {
+		return core.Instance{}, fmt.Errorf("boot cdrom needs a cdrom image: %w", core.ErrInvalidRequest)
 	}
 
 	now := time.Now().UTC()
 	inst := core.Instance{
-		ID:        util.NewID("i"),
-		Name:      req.Name,
-		Flavor:    flavor,
-		ImageRef:  req.ImageRef,
-		State:     core.StatePending,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         util.NewID("i"),
+		Name:       req.Name,
+		Namespace:  req.Namespace,
+		Flavor:     flavor,
+		Disks:      disks,
+		CdromImage: req.CdromImage,
+		BootDevice: boot,
+		ImageRef:   req.ImageRef,
+		State:      core.StatePending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	created, err := s.Store.Create(ctx, inst)
 	if err != nil {
@@ -199,6 +259,58 @@ func (s *Instances) Start(ctx context.Context, id string) error {
 
 func (s *Instances) Stop(ctx context.Context, id string) error {
 	return s.command(ctx, bus.TopicInstanceStop, id)
+}
+
+// AttachDisk enqueues an extra disk attach. The name and image travel in
+// the payload; size arrives as the Quantity string the api parsed ("50GB").
+// Validation of names, sizes and state is the controller's job, once, where
+// the engine call happens — the api only checks the request is addressed.
+func (s *Instances) AttachDisk(ctx context.Context, id string, disk core.CreateDiskRequest) error {
+	if disk.Name == "" {
+		return fmt.Errorf("disk name required: %w", core.ErrInvalidRequest)
+	}
+	payload, err := json.Marshal(map[string]string{"name": disk.Name, "size": disk.Size.String(), "image": disk.Image})
+	if err != nil {
+		return err
+	}
+	return s.publish(ctx, bus.TopicInstanceAttachDisk, id, payload)
+}
+
+func (s *Instances) DetachDisk(ctx context.Context, id, name string) error {
+	if name == "" {
+		return fmt.Errorf("disk name required: %w", core.ErrInvalidRequest)
+	}
+	payload, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return err
+	}
+	return s.publish(ctx, bus.TopicInstanceDetachDisk, id, payload)
+}
+
+func (s *Instances) AttachCdrom(ctx context.Context, id, image string) error {
+	if image == "" {
+		return fmt.Errorf("cdrom image required: %w", core.ErrInvalidRequest)
+	}
+	payload, err := json.Marshal(map[string]string{"image": image})
+	if err != nil {
+		return err
+	}
+	return s.publish(ctx, bus.TopicInstanceAttachCdrom, id, payload)
+}
+
+func (s *Instances) DetachCdrom(ctx context.Context, id string) error {
+	return s.command(ctx, bus.TopicInstanceDetachCdrom, id)
+}
+
+func (s *Instances) SetBootDevice(ctx context.Context, id, device string) error {
+	if device == "" {
+		return fmt.Errorf("boot device required: %w", core.ErrInvalidRequest)
+	}
+	payload, err := json.Marshal(map[string]string{"device": device})
+	if err != nil {
+		return err
+	}
+	return s.publish(ctx, bus.TopicInstanceSetBoot, id, payload)
 }
 
 func (s *Instances) Migrate(ctx context.Context, id, targetNodeID string) error {
