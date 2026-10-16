@@ -55,4 +55,5 @@ One binary, three subcommands (`api`, `controller`, `agent`). `internal/core`
 is dependency-free types only. `compute` drives the instance state machine;
 `scheduler` filters → weighs → claims; `driver` engines implement
 `core.Driver` (fake everywhere, kvm on Linux). Stores: memory (dev/tests)
-and gormdb (postgres/SQLite). Manifests live in `arsanctl/examples/`.
+and gormdb (postgres/SQLite). Manifests live in `kloudctl/examples/`
+(the `kloudctl` CLI now lives in the `kloudapi` repo).
