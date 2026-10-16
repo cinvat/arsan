@@ -109,10 +109,8 @@ type instanceRow struct {
 	FlavorDedicated bool   `gorm:"column:flavor_dedicated"`
 	FlavorRAM       int    `gorm:"column:flavor_ram"`
 	FlavorDisk      int    `gorm:"column:flavor_disk"`
-	PinnedCPUs      string `gorm:"column:pinned_cpus;type:text"` // comma-separated, dedicated only
-	DisksJSON       string `gorm:"column:disks_json;type:text"`   // extra data disks, JSON
-	CdromImage      string `gorm:"size:512"`
-	BootDevice      string `gorm:"size:16"`
+	PinnedCPUs      string `gorm:"column:pinned_cpus;type:text"`      // comma-separated, dedicated only
+	AttachmentsJSON string `gorm:"column:attachments_json;type:text"` // volume attachments, JSON
 	ImageRef        string `gorm:"size:512"`
 	State           string `gorm:"size:32;index"`
 	NodeID          string `gorm:"size:64;index"`
@@ -189,7 +187,7 @@ func fromFlavor(f core.Flavor) flavorRow {
 func (flavorRow) TableName() string { return "flavors" }
 
 func (s *Store) migrate() error {
-	if err := s.db.AutoMigrate(&instanceRow{}, &nodeRow{}, &flavorRow{}); err != nil {
+	if err := s.db.AutoMigrate(&instanceRow{}, &nodeRow{}, &flavorRow{}, &volumeRow{}); err != nil {
 		return fmt.Errorf("gormdb: migrate: %w", err)
 	}
 	return nil
@@ -215,9 +213,7 @@ func toInstance(r instanceRow) core.Instance {
 		Namespace:     r.Namespace,
 		Flavor:        core.Flavor{Name: r.FlavorName, VCPU: vcpu, RAM: r.FlavorRAM},
 		PinnedCPUs:    splitInts(r.PinnedCPUs),
-		Disks:         decodeDisks(r.DisksJSON),
-		CdromImage:    r.CdromImage,
-		BootDevice:    r.BootDevice,
+		Volumes:       decodeAttachments(r.AttachmentsJSON),
 		ImageRef:      r.ImageRef,
 		State:         core.InstanceState(r.State),
 		NodeID:        r.NodeID,
@@ -242,9 +238,7 @@ func fromInstance(i core.Instance) instanceRow {
 		FlavorDedicated: i.Flavor.VCPU.Dedicated,
 		FlavorRAM:       i.Flavor.RAM,
 		PinnedCPUs:      joinInts(i.PinnedCPUs),
-		DisksJSON:       encodeDisks(i.Disks),
-		CdromImage:      i.CdromImage,
-		BootDevice:      i.BootDevice,
+		AttachmentsJSON: encodeAttachments(i.Volumes),
 		ImageRef:        i.ImageRef,
 		State:           string(i.State),
 		NodeID:          i.NodeID,
@@ -327,26 +321,26 @@ func joinInts(nums []int) string {
 	return strings.Join(parts, ",")
 }
 
-// encodeDisks/decodeDisks persist the extra data disks as one JSON document.
-// A list that only ever travels whole (read, modified, written back) does not
-// earn a join table; the failure mode of a corrupt document is "no extra
-// disks", never a half-attached one.
-func encodeDisks(disks []core.Disk) string {
-	if len(disks) == 0 {
+// encodeAttachments/decodeAttachments persist the VM's volume links as one
+// JSON document. Links only ever travel whole (read, modified, written
+// back) and the volume rows carry the sizes, so no join table: a corrupt
+// document reads as "no attachments", never a half-attached one.
+func encodeAttachments(atts []core.VolumeAttachment) string {
+	if len(atts) == 0 {
 		return ""
 	}
-	raw, err := json.Marshal(disks)
+	raw, err := json.Marshal(atts)
 	if err != nil {
 		return ""
 	}
 	return string(raw)
 }
 
-func decodeDisks(s string) []core.Disk {
+func decodeAttachments(s string) []core.VolumeAttachment {
 	if s == "" {
 		return nil
 	}
-	var out []core.Disk
+	var out []core.VolumeAttachment
 	if err := json.Unmarshal([]byte(s), &out); err != nil {
 		return nil
 	}

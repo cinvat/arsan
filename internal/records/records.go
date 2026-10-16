@@ -106,28 +106,148 @@ func (s *Flavors) Delete(ctx context.Context, name string) error {
 	return s.Store.DeleteFlavor(ctx, name)
 }
 
-// resolveDisks validates extra disk requests and assigns stable file indexes
-// starting at 1 (0 is the root overlay). Names are DNS labels, unique per VM,
-// sizes positive.
-func resolveDisks(req []core.CreateDiskRequest) ([]core.Disk, error) {
-	seen := make(map[string]bool, len(req))
-	out := make([]core.Disk, 0, len(req))
-	for i, d := range req {
-		if err := core.ValidateName(d.Name); err != nil {
-			return nil, fmt.Errorf("disk %d: %w", i, err)
+// resolveVolumes turns block-device specs into volume rows plus the
+// instance's attachment list. Inline entries provision new rows; volume_id
+// entries claim prepared ones, which must be available.
+//
+// Rules, Nova-style: image_ref alone auto-creates a boot root (it may not
+// combine with an explicit boot volume); without image_ref the specs must
+// carry exactly one boot_index: 0 entry; device names run vda, vdb… in
+// attach order and never move.
+func (s *Instances) resolveVolumes(ctx context.Context, instID string, req core.CreateInstanceRequest) ([]core.VolumeAttachment, error) {
+	if s.Volumes == nil {
+		return nil, fmt.Errorf("volume store not configured: %w", core.ErrInvalidRequest)
+	}
+	var volumes []core.Volume
+	bootable := 0
+	attach := func(v core.Volume) {
+		volumes = append(volumes, v)
+		if v.BootIndex != nil {
+			bootable++
 		}
-		if seen[d.Name] {
-			return nil, fmt.Errorf("disk %q: duplicate name: %w", d.Name, core.ErrInvalidRequest)
+	}
+	for i, spec := range req.Volumes {
+		if spec.VolumeID != "" {
+			if spec.Name != "" || spec.Size.MiB() != 0 || spec.Image != "" || spec.Cdrom || spec.BootIndex != nil || spec.DeleteOnTermination {
+				return nil, fmt.Errorf("volume entry %d: volume_id is exclusive with inline fields: %w", i, core.ErrInvalidRequest)
+			}
+			v, err := s.Volumes.GetVolume(ctx, spec.VolumeID)
+			if err != nil {
+				return nil, err
+			}
+			if v.Namespace != req.Namespace {
+				return nil, fmt.Errorf("volume %s: cross-namespace attach: %w", v.ID, core.ErrInvalidRequest)
+			}
+			if v.State != core.VolumeAvailable {
+				return nil, fmt.Errorf("volume %s: held by %s: %w", v.ID, v.AttachedTo, core.ErrCapacityConflict)
+			}
+			attach(v)
+			continue
 		}
-		seen[d.Name] = true
-		if d.Size.MiB() <= 0 {
-			return nil, fmt.Errorf("disk %q: size is required (e.g. \"50GB\"): %w", d.Name, core.ErrInvalidRequest)
+		if err := core.ValidateName(spec.Name); err != nil {
+			return nil, fmt.Errorf("volume entry %d: %w", i, err)
 		}
-		out = append(out, core.Disk{
-			Name: d.Name, Index: i + 1, SizeMiB: d.Size.MiB(), Image: d.Image,
+		if spec.Size.MiB() <= 0 && !spec.Cdrom && spec.Image == "" {
+			return nil, fmt.Errorf("volume %q needs a size or a base image: %w", spec.Name, core.ErrInvalidRequest)
+		}
+		v, err := s.Volumes.CreateVolume(ctx, core.Volume{
+			ID:   "vol-" + util.NewID(""),
+			Name: spec.Name, Namespace: req.Namespace,
+			SizeMiB: spec.Size.MiB(), Image: spec.Image, Cdrom: spec.Cdrom,
+			BootIndex: spec.BootIndex, DeleteOnTermination: spec.DeleteOnTermination && !spec.Cdrom,
+		})
+		if err != nil {
+			return nil, err
+		}
+		// Inline volumes are ours from birth: hold them now so a concurrent
+		// create cannot claim the row before placement does.
+		if _, err := s.Volumes.AttachVolume(ctx, v.ID, instID); err != nil {
+			return nil, err
+		}
+		v.State = core.VolumeInUse
+		v.AttachedTo = instID
+		attach(v)
+		continue
+	}
+	if req.ImageRef != "" {
+		for _, v := range volumes {
+			if v.BootIndex != nil {
+				return nil, fmt.Errorf("image_ref with an explicit boot volume is ambiguous: %w", core.ErrInvalidRequest)
+			}
+		}
+		zero := 0
+		root, err := s.Volumes.CreateVolume(ctx, core.Volume{
+			ID:   "vol-" + util.NewID(""),
+			Name: req.Name + "-root", Namespace: req.Namespace,
+			Image: req.ImageRef, BootIndex: &zero, DeleteOnTermination: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.Volumes.AttachVolume(ctx, root.ID, instID); err != nil {
+			return nil, err
+		}
+		root.State = core.VolumeInUse
+		root.AttachedTo = instID
+		volumes = append([]core.Volume{root}, volumes...)
+		bootable++
+	}
+	if bootable == 0 && len(volumes) > 0 {
+		zero := 0
+		volumes[0].BootIndex = &zero
+		if _, err := s.Volumes.SetVolumeBootIndex(ctx, volumes[0].ID, &zero); err != nil {
+			return nil, err
+		}
+		bootable = 1
+	}
+	if bootable > 1 {
+		return nil, fmt.Errorf("at most one boot volume per VM, use set-boot to move it: %w", core.ErrInvalidRequest)
+	}
+	attachments := make([]core.VolumeAttachment, 0, len(volumes))
+	for i, v := range volumes {
+		attachments = append(attachments, core.VolumeAttachment{
+			VolumeID: v.ID, Device: fmt.Sprintf("vd%c", 'a'+byte(i)), BootIndex: v.BootIndex,
 		})
 	}
-	return out, nil
+	return attachments, nil
+}
+
+// Volumes implements core.VolumeService: named, independent block devices.
+type Volumes struct {
+	Store core.VolumeStore
+}
+
+func (s *Volumes) Create(ctx context.Context, req core.CreateVolumeRequest) (core.Volume, error) {
+	if err := core.ValidateName(req.Name); err != nil {
+		return core.Volume{}, err
+	}
+	if req.Namespace == "" {
+		req.Namespace = core.DefaultNamespace
+	}
+	if err := core.ValidateNamespace(req.Namespace); err != nil {
+		return core.Volume{}, err
+	}
+	if req.Size.MiB() <= 0 && !req.Cdrom && req.Image == "" {
+		return core.Volume{}, fmt.Errorf("volume needs a size or a base image: %w", core.ErrInvalidRequest)
+	}
+	return s.Store.CreateVolume(ctx, core.Volume{
+		ID:   "vol-" + util.NewID(""),
+		Name: req.Name, Namespace: req.Namespace,
+		SizeMiB: req.Size.MiB(), Image: req.Image, Cdrom: req.Cdrom,
+		BootIndex: req.BootIndex, DeleteOnTermination: req.DeleteOnTermination && !req.Cdrom,
+	})
+}
+
+func (s *Volumes) Get(ctx context.Context, id string) (core.Volume, error) {
+	return s.Store.GetVolume(ctx, id)
+}
+
+func (s *Volumes) List(ctx context.Context) ([]core.Volume, error) {
+	return s.Store.ListVolumes(ctx)
+}
+
+func (s *Volumes) Delete(ctx context.Context, id string) error {
+	return s.Store.DeleteVolume(ctx, id)
 }
 
 // Instances implements core.InstanceService over an instance store and the bus.
@@ -136,6 +256,9 @@ type Instances struct {
 	// Flavors resolves FlavorRef at create time. Nil keeps legacy inline-only
 	// behavior (tests that construct Instances directly).
 	Flavors core.FlavorStore
+	// Volumes resolves volume references at create time and owns the
+	// lifecycle of inline-provisioned ones.
+	Volumes core.VolumeStore
 	Bus     bus.Bus
 }
 
@@ -156,8 +279,8 @@ func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) 
 	if err := core.ValidateNamespace(req.Namespace); err != nil {
 		return core.Instance{}, err
 	}
-	if req.ImageRef == "" {
-		return core.Instance{}, fmt.Errorf("image_ref required: %w", core.ErrInvalidRequest)
+	if req.ImageRef == "" && len(req.Volumes) == 0 {
+		return core.Instance{}, fmt.Errorf("image_ref or volumes required: %w", core.ErrInvalidRequest)
 	}
 	// Names are unique per namespace: two VMs cannot share a hypervisor
 	// domain name, and the domain name is namespace-name.
@@ -188,34 +311,23 @@ func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) 
 	if flavor.RAM <= 0 {
 		return core.Instance{}, fmt.Errorf("flavor must have positive ram: %w", core.ErrInvalidRequest)
 	}
-	disks, err := resolveDisks(req.Disks)
+	instID := util.NewID("i")
+	attachments, err := s.resolveVolumes(ctx, instID, req)
 	if err != nil {
 		return core.Instance{}, err
-	}
-	boot := req.BootDevice
-	if boot == "" {
-		boot = core.BootDisk
-	}
-	if boot != core.BootDisk && boot != core.BootCDROM {
-		return core.Instance{}, fmt.Errorf("boot_device %q: want disk or cdrom: %w", req.BootDevice, core.ErrInvalidRequest)
-	}
-	if boot == core.BootCDROM && req.CdromImage == "" {
-		return core.Instance{}, fmt.Errorf("boot cdrom needs a cdrom image: %w", core.ErrInvalidRequest)
 	}
 
 	now := time.Now().UTC()
 	inst := core.Instance{
-		ID:         util.NewID("i"),
-		Name:       req.Name,
-		Namespace:  req.Namespace,
-		Flavor:     flavor,
-		Disks:      disks,
-		CdromImage: req.CdromImage,
-		BootDevice: boot,
-		ImageRef:   req.ImageRef,
-		State:      core.StatePending,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:        instID,
+		Name:      req.Name,
+		Namespace: req.Namespace,
+		Flavor:    flavor,
+		Volumes:   attachments,
+		ImageRef:  req.ImageRef,
+		State:     core.StatePending,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 	created, err := s.Store.Create(ctx, inst)
 	if err != nil {
@@ -261,52 +373,39 @@ func (s *Instances) Stop(ctx context.Context, id string) error {
 	return s.command(ctx, bus.TopicInstanceStop, id)
 }
 
-// AttachDisk enqueues an extra disk attach. The name and image travel in
-// the payload; size arrives as the Quantity string the api parsed ("50GB").
-// Validation of names, sizes and state is the controller's job, once, where
-// the engine call happens — the api only checks the request is addressed.
-func (s *Instances) AttachDisk(ctx context.Context, id string, disk core.CreateDiskRequest) error {
-	if disk.Name == "" {
-		return fmt.Errorf("disk name required: %w", core.ErrInvalidRequest)
+// AttachVolume enqueues an attach of a prepared volume, optionally taking
+// the boot position. DetachVolume frees it back to available storage; only
+// VM delete with DeleteOnTermination removes files.
+func (s *Instances) AttachVolume(ctx context.Context, id, volumeID string, bootIndex *int) error {
+	if volumeID == "" {
+		return fmt.Errorf("volume id required: %w", core.ErrInvalidRequest)
 	}
-	payload, err := json.Marshal(map[string]string{"name": disk.Name, "size": disk.Size.String(), "image": disk.Image})
+	payload, err := json.Marshal(map[string]any{"volume_id": volumeID, "boot_index": bootIndex})
 	if err != nil {
 		return err
 	}
-	return s.publish(ctx, bus.TopicInstanceAttachDisk, id, payload)
+	return s.publish(ctx, bus.TopicInstanceAttachVolume, id, payload)
 }
 
-func (s *Instances) DetachDisk(ctx context.Context, id, name string) error {
-	if name == "" {
-		return fmt.Errorf("disk name required: %w", core.ErrInvalidRequest)
+func (s *Instances) DetachVolume(ctx context.Context, id, volumeID string) error {
+	if volumeID == "" {
+		return fmt.Errorf("volume id required: %w", core.ErrInvalidRequest)
 	}
-	payload, err := json.Marshal(map[string]string{"name": name})
+	payload, err := json.Marshal(map[string]string{"volume_id": volumeID})
 	if err != nil {
 		return err
 	}
-	return s.publish(ctx, bus.TopicInstanceDetachDisk, id, payload)
+	return s.publish(ctx, bus.TopicInstanceDetachVolume, id, payload)
 }
 
-func (s *Instances) AttachCdrom(ctx context.Context, id, image string) error {
-	if image == "" {
-		return fmt.Errorf("cdrom image required: %w", core.ErrInvalidRequest)
+// SetBootVolume moves the single boot position to another attached volume.
+// Rescue is attach (a cdrom volume), set boot to it, start — detach and
+// delete it when done.
+func (s *Instances) SetBootVolume(ctx context.Context, id, volumeID string) error {
+	if volumeID == "" {
+		return fmt.Errorf("volume id required: %w", core.ErrInvalidRequest)
 	}
-	payload, err := json.Marshal(map[string]string{"image": image})
-	if err != nil {
-		return err
-	}
-	return s.publish(ctx, bus.TopicInstanceAttachCdrom, id, payload)
-}
-
-func (s *Instances) DetachCdrom(ctx context.Context, id string) error {
-	return s.command(ctx, bus.TopicInstanceDetachCdrom, id)
-}
-
-func (s *Instances) SetBootDevice(ctx context.Context, id, device string) error {
-	if device == "" {
-		return fmt.Errorf("boot device required: %w", core.ErrInvalidRequest)
-	}
-	payload, err := json.Marshal(map[string]string{"device": device})
+	payload, err := json.Marshal(map[string]string{"volume_id": volumeID})
 	if err != nil {
 		return err
 	}

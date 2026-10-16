@@ -18,6 +18,7 @@ type Store struct {
 	instances map[string]core.Instance
 	nodes     map[string]core.Node
 	flavors   map[string]core.Flavor
+	volumes   map[string]core.Volume
 }
 
 func New() *Store {
@@ -25,6 +26,7 @@ func New() *Store {
 		instances: make(map[string]core.Instance),
 		nodes:     make(map[string]core.Node),
 		flavors:   make(map[string]core.Flavor),
+		volumes:   make(map[string]core.Volume),
 	}
 }
 
@@ -88,6 +90,156 @@ func (s *Store) DeleteFlavor(ctx context.Context, name string) error {
 	}
 	delete(s.flavors, name)
 	return nil
+}
+
+func (s *Store) CreateVolume(ctx context.Context, v core.Volume) (core.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Volume{}, err
+	}
+	if v.Name == "" {
+		return core.Volume{}, fmt.Errorf("volume name required: %w", core.ErrInvalidRequest)
+	}
+	if err := core.ValidateName(v.Name); err != nil {
+		return core.Volume{}, err
+	}
+	if v.SizeMiB <= 0 && !v.Cdrom && v.Image == "" {
+		return core.Volume{}, fmt.Errorf("volume %q needs a size or a base image: %w", v.Name, core.ErrInvalidRequest)
+	}
+	if v.Cdrom {
+		v.DeleteOnTermination = false
+	}
+	if v.State == "" {
+		v.State = core.VolumeAvailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.volumes[v.ID]; v.ID != "" && ok {
+		return core.Volume{}, fmt.Errorf("volume %s exists: %w", v.ID, core.ErrInvalidRequest)
+	}
+	now := time.Now().UTC()
+	v.CreatedAt, v.UpdatedAt = now, now
+	s.volumes[v.ID] = v
+	return v, nil
+}
+
+func (s *Store) GetVolume(ctx context.Context, id string) (core.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Volume{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	v, ok := s.volumes[id]
+	if !ok {
+		return core.Volume{}, fmt.Errorf("get volume %s: %w", id, core.ErrVolumeNotFound)
+	}
+	return v, nil
+}
+
+func (s *Store) ListVolumes(ctx context.Context) ([]core.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.SortedFunc(maps.Values(s.volumes),
+		func(a, b core.Volume) int { return cmp.Compare(a.ID, b.ID) }), nil
+}
+
+func (s *Store) DeleteVolume(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.volumes[id]
+	if !ok {
+		return nil
+	}
+	if v.State == core.VolumeInUse {
+		return fmt.Errorf("delete volume %s: attached to %s: %w", id, v.AttachedTo, core.ErrInvalidRequest)
+	}
+	delete(s.volumes, id)
+	return nil
+}
+
+// AttachVolume is compare-and-swap on status: only an available volume
+// attaches, so two VMs racing for one disk resolve to exactly one holder.
+func (s *Store) AttachVolume(ctx context.Context, id, instanceID string) (core.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Volume{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.volumes[id]
+	if !ok {
+		return core.Volume{}, fmt.Errorf("attach volume %s: %w", id, core.ErrVolumeNotFound)
+	}
+	if v.State != core.VolumeAvailable {
+		if v.AttachedTo == instanceID {
+			return v, nil // already ours (inline-created, or a redelivery)
+		}
+		return core.Volume{}, fmt.Errorf("attach volume %s: held by %s: %w", id, v.AttachedTo, core.ErrCapacityConflict)
+	}
+	v.State = core.VolumeInUse
+	v.AttachedTo = instanceID
+	v.UpdatedAt = time.Now().UTC()
+	s.volumes[id] = v
+	return v, nil
+}
+
+func (s *Store) DetachVolume(ctx context.Context, id string) (core.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Volume{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.volumes[id]
+	if !ok {
+		return core.Volume{}, fmt.Errorf("detach volume %s: %w", id, core.ErrVolumeNotFound)
+	}
+	if v.State != core.VolumeInUse {
+		return core.Volume{}, fmt.Errorf("detach volume %s: not attached: %w", id, core.ErrInvalidRequest)
+	}
+	v.State = core.VolumeAvailable
+	v.AttachedTo = ""
+	v.UpdatedAt = time.Now().UTC()
+	s.volumes[id] = v
+	return v, nil
+}
+
+func (s *Store) PinVolume(ctx context.Context, id, nodeID string) (core.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Volume{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.volumes[id]
+	if !ok {
+		return core.Volume{}, fmt.Errorf("pin volume %s: %w", id, core.ErrVolumeNotFound)
+	}
+	if v.NodeID != "" && v.NodeID != nodeID {
+		return v, fmt.Errorf("pin volume %s: files live on %s: %w", id, v.NodeID, core.ErrCapacityConflict)
+	}
+	v.NodeID = nodeID
+	v.UpdatedAt = time.Now().UTC()
+	s.volumes[id] = v
+	return v, nil
+}
+
+func (s *Store) SetVolumeBootIndex(ctx context.Context, id string, index *int) (core.Volume, error) {
+	if err := ctx.Err(); err != nil {
+		return core.Volume{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.volumes[id]
+	if !ok {
+		return core.Volume{}, fmt.Errorf("set boot %s: %w", id, core.ErrVolumeNotFound)
+	}
+	v.BootIndex = index
+	v.UpdatedAt = time.Now().UTC()
+	s.volumes[id] = v
+	return v, nil
 }
 
 func (s *Store) Create(ctx context.Context, i core.Instance) (core.Instance, error) {
@@ -179,6 +331,20 @@ func (s *Store) Transition(ctx context.Context, id string, from, to core.Instanc
 	return i, nil
 }
 
+// volumeSizes sums attached volumes from the volume table. Rows deleted
+// out from under the instance read as zero rather than failing the whole
+// release: the count was already returned through an earlier path, or the
+// volume never existed in this store (tests that stub attachments).
+func volumeSizes(volumes map[string]core.Volume, atts []core.VolumeAttachment) core.Resources {
+	var out core.Resources
+	for _, att := range atts {
+		if v, ok := volumes[att.VolumeID]; ok {
+			out.Disk += v.SizeMiB
+		}
+	}
+	return out
+}
+
 func (s *Store) ReleaseReservations(ctx context.Context, instanceID, nodeID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -194,7 +360,7 @@ func (s *Store) ReleaseReservations(ctx context.Context, instanceID, nodeID stri
 	if !ok {
 		return nil
 	}
-	n.Available = n.Available.AddCapped(i.Flavor.Resources().Add(core.DiskResources(i.Disks)), n.Total)
+	n.Available = n.Available.AddCapped(i.Flavor.Resources().Add(volumeSizes(s.volumes, i.Volumes)), n.Total)
 	// Free the instance's exclusive CPUs, if it held any. Count restoration
 	// above and pin release here are the two halves of one teardown; the
 	// instance record carries the pins so a retry frees exactly what was held.

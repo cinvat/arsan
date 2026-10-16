@@ -19,6 +19,32 @@ func testNode(t *testing.T, s *Store, total core.Resources) core.Node {
 	return n
 }
 
+// Pinning is sticky: the first node wins, re-pinning there is a no-op, and
+// pinning elsewhere conflicts instead of moving files that do not move.
+func TestPinVolumeSticky(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+	v, err := s.CreateVolume(ctx, core.Volume{ID: "vol-1", Name: "d", Namespace: "default", SizeMiB: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.NodeID != "" {
+		t.Fatalf("fresh volume pinned to %q, want unpinned", v.NodeID)
+	}
+	if _, err := s.PinVolume(ctx, "vol-1", "n-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PinVolume(ctx, "vol-1", "n-1"); err != nil {
+		t.Fatalf("re-pin to the same node must be a no-op: %v", err)
+	}
+	if _, err := s.PinVolume(ctx, "vol-1", "n-2"); err == nil {
+		t.Fatal("pinning elsewhere must conflict, not move")
+	}
+	if _, err := s.PinVolume(ctx, "vol-ghost", "n-1"); err == nil {
+		t.Fatal("pinning a missing volume must fail")
+	}
+}
+
 // Dedicated claims are exclusive: the second claim skips held CPUs, and a
 // claim larger than the free set fails without mutating.
 func TestClaimCPUsExclusive(t *testing.T) {

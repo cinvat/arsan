@@ -69,15 +69,17 @@ func TestInstanceReasonsRoundTrip(t *testing.T) {
 	}
 }
 
-// Disks, cdrom and boot device round-trip with the instance: the record is
-// the whole truth the engine re-renders from.
-func TestInstanceDisksRoundTrip(t *testing.T) {
+// Volume attachments round-trip with the instance: the record is the whole
+// truth the engine re-renders from.
+func TestInstanceVolumesRoundTrip(t *testing.T) {
 	s := newStore(t)
 	inst := mustInstance(t, s, "i-1", core.StatePending)
+	zero := 0
+	inst.Volumes = []core.VolumeAttachment{
+		{VolumeID: "vol-root", Device: "vda", BootIndex: &zero},
+		{VolumeID: "vol-data", Device: "vdb"},
+	}
 	var err error
-	inst.Disks = []core.Disk{{Name: "data", Index: 1, SizeMiB: 50 * 1024}}
-	inst.CdromImage = "/images/rescue.iso"
-	inst.BootDevice = core.BootCDROM
 	if inst, err = s.Update(t.Context(), inst); err != nil {
 		t.Fatal(err)
 	}
@@ -85,11 +87,59 @@ func TestInstanceDisksRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Disks) != 1 || got.Disks[0] != inst.Disks[0] {
-		t.Fatalf("disks = %+v, want %+v", got.Disks, inst.Disks)
+	if len(got.Volumes) != 2 || !sameAttachment(got.Volumes[0], inst.Volumes[0]) || !sameAttachment(got.Volumes[1], inst.Volumes[1]) {
+		t.Fatalf("attachments = %+v, want %+v", got.Volumes, inst.Volumes)
 	}
-	if got.CdromImage != inst.CdromImage || got.BootDevice != inst.BootDevice {
-		t.Fatalf("cdrom = %q boot = %q", got.CdromImage, got.BootDevice)
+}
+
+// sameAttachment compares by value: a GORM round trip allocates fresh
+// pointers, so pointer equality would always fail.
+func sameAttachment(a, b core.VolumeAttachment) bool {
+	if a.VolumeID != b.VolumeID || a.Device != b.Device {
+		return false
+	}
+	if (a.BootIndex == nil) != (b.BootIndex == nil) {
+		return false
+	}
+	return a.BootIndex == nil || *a.BootIndex == *b.BootIndex
+}
+
+// Volumes are independent records with compare-and-swap attach semantics.
+func TestVolumeAttachDetachRoundTrip(t *testing.T) {
+	s := newStore(t)
+	v, err := s.CreateVolume(t.Context(), core.Volume{
+		ID: "vol-1", Name: "data", Namespace: "default", SizeMiB: 50 * 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.State != core.VolumeAvailable {
+		t.Fatalf("state = %s, want available", v.State)
+	}
+	if _, err := s.AttachVolume(t.Context(), "vol-1", "i-9"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetVolume(t.Context(), "vol-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != core.VolumeInUse || got.AttachedTo != "i-9" {
+		t.Fatalf("got %+v, want in-use by i-9", got)
+	}
+	if _, err := s.AttachVolume(t.Context(), "vol-1", "i-10"); err == nil {
+		t.Fatal("double attach to another instance must fail")
+	}
+	if _, err := s.AttachVolume(t.Context(), "vol-1", "i-9"); err != nil {
+		t.Fatalf("re-attach to the same holder must be a no-op: %v", err)
+	}
+	if _, err := s.DetachVolume(t.Context(), "vol-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteVolume(t.Context(), "vol-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteVolume(t.Context(), "vol-1"); err != nil {
+		t.Fatalf("double delete must be a no-op: %v", err)
 	}
 }
 

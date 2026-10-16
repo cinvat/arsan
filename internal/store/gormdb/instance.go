@@ -143,8 +143,12 @@ func (s *Store) ReleaseReservations(ctx context.Context, instanceID, nodeID stri
 			count = inst.FlavorVCPU
 		}
 		disk := 0
-		for _, d := range decodeDisks(inst.DisksJSON) {
-			disk += d.SizeMiB
+		for _, att := range decodeAttachments(inst.AttachmentsJSON) {
+			var vol volumeRow
+			if err := tx.First(&vol, "id = ?", att.VolumeID).Error; err != nil {
+				continue // row gone: its bytes were already accounted elsewhere
+			}
+			disk += vol.SizeMiB
 		}
 		updates := map[string]any{
 			"available_vcpu": clampAdd("available_vcpu", "total_vcpu", count),
