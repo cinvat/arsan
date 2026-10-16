@@ -482,9 +482,8 @@ exactly the case that matters.
 | `instance.start` | `SHUTOFF` → build |
 | `instance.stop` | `RUNNING` → `SHUTOFF`, reservation retained |
 | `instance.migrate` | move to a named target host |
-| `instance.attach-disk` / `detach-disk` | converge one extra disk, live if running |
-| `instance.attach-cdrom` / `detach-cdrom` | converge the read-only iso, live if running |
-| `instance.set-boot` | select disk or cdrom boot; SHUTOFF only, redefines |
+| `instance.attach-volume` / `detach-volume` | converge one volume, live if running |
+| `instance.set-boot` | move the boot index; SHUTOFF only, redefines |
 | `node.reclaim` | operator-driven re-placement (drain) |
 
 ### Handler contract
@@ -674,12 +673,16 @@ rediscovered:
   quantities); `POST /virtualmachines` takes `flavor_ref` and snapshots the
   resources onto the instance, so later flavor edits never resize existing
   VMs. The legacy inline `flavor` still decodes for old clients.
-- **Storage.** *Settled: disks are per-VM, not per-flavor.* A flavor sizes
-  compute only; the VM carries `disks[]` (extra qcow2, indexed from 1), an
-  optional read-only `cdrom` iso, and a boot device. The root is always a
-  thin overlay of the image (`<ns>-<name>-0.qcow2`) provisioned next to its
-  base at build; extras are blank or overlays of their own base. The domain
-  XML lists every owned file in metadata, and Delete removes exactly those —
-  bases and isos are shared and never removed. Exactly one device boots
-  (selectable while SHUTOFF); attach/detach works live on a running guest
-  through `virDomainAttachDevice`, mirroring KubeVirt's hotplug semantics.
+- **Storage.** *Settled: volumes are first-class records, Nova-style.* A
+  flavor sizes compute only; block devices live in a `Volume` table
+  (name, size, base image or blank, cdrom flag, boot index,
+  delete-on-termination) and attach to one VM at a time by id, like
+  `block_device_mapping_v2` with `source_type` image/blank/volume and a
+  single boot index 0. The scheduler reserves their bytes; attach is
+  compare-and-swap on `available`. The engine provisions one qcow2 overlay
+  per volume next to its base and lists every owned file in domain metadata,
+  so Delete removes exactly what it created — bases and isos are shared and
+  never removed. Attach/detach works live on a running guest through
+  `virDomainAttachDeviceFlags`; only the boot move needs a stopped redefine.
+  Detach never deletes: only VM delete with delete-on-termination removes
+  the file.
