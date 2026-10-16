@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cinvat/arsan/internal/core"
+	"github.com/samber/lo"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -527,13 +528,9 @@ func detach(tx *gorm.DB, nodeID, instanceID string) error {
 		}
 		return err
 	}
-	ids := splitList(row.Instances)
-	kept := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id != instanceID {
-			kept = append(kept, id)
-		}
-	}
+	kept := lo.Reject(splitList(row.Instances), func(id string, _ int) bool {
+		return id == instanceID
+	})
 	return tx.Model(&nodeRow{}).Where("id = ?", nodeID).
 		Update("instances", joinList(kept)).Error
 }
@@ -573,11 +570,7 @@ func (s *Store) ListFlavors(ctx context.Context) ([]core.Flavor, error) {
 	if err := s.withTimeout(ctx).Order("name").Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("list flavors: %w", err)
 	}
-	out := make([]core.Flavor, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, toFlavor(r))
-	}
-	return out, nil
+	return lo.Map(rows, func(r flavorRow, _ int) core.Flavor { return toFlavor(r) }), nil
 }
 
 func (s *Store) DeleteFlavor(ctx context.Context, name string) error {

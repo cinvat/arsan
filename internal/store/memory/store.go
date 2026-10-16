@@ -599,7 +599,11 @@ func (s *Store) AttachInstance(ctx context.Context, nodeID, instanceID string) e
 	if !ok {
 		return fmt.Errorf("attach %s to %s: %w", instanceID, nodeID, core.ErrNodeNotFound)
 	}
-	n.Instances = append(n.Instances, instanceID)
+	// A redelivered attach is a no-op, mirroring the gorm store: without the
+	// guard a retried build would list the instance twice.
+	if !lo.Contains(n.Instances, instanceID) {
+		n.Instances = append(n.Instances, instanceID)
+	}
 	s.nodes[nodeID] = n
 	return nil
 }

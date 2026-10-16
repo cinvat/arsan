@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cinvat/arsan/internal/core"
+	"github.com/samber/lo"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -95,11 +96,7 @@ func (s *Store) ListVolumes(ctx context.Context) ([]core.Volume, error) {
 	if err := s.withTimeout(ctx).Order("id").Find(&rows).Error; err != nil {
 		return nil, fmt.Errorf("list volumes: %w", err)
 	}
-	out := make([]core.Volume, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, toVolume(r))
-	}
-	return out, nil
+	return lo.Map(rows, func(r volumeRow, _ int) core.Volume { return toVolume(r) }), nil
 }
 
 func (s *Store) DeleteVolume(ctx context.Context, id string) error {
