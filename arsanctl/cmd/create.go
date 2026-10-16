@@ -36,7 +36,7 @@ var createCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("%s: %w", m.Metadata.Name, err)
 			}
-			// Accepted, not running: poll `arsanctl get vm` until ACTIVE.
+			// Accepted, not running: poll `arsanctl get vm` until RUNNING.
 			fmt.Printf("virtualmachine/%s created (%s)\n", vm.Name, vm.State)
 		}
 		return nil

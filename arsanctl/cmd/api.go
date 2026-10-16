@@ -93,6 +93,7 @@ type VirtualMachine struct {
 	ImageRef      string `json:"ImageRef"`
 	Flavor        Flavor `json:"Flavor"`
 	PinnedCPUs    []int  `json:"PinnedCPUs"`
+	PendingReason string `json:"PendingReason"`
 	FailureReason string `json:"FailureReason"`
 }
 

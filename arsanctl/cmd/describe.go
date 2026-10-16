@@ -112,6 +112,9 @@ func describeVM(vm VirtualMachine) {
 	if len(vm.PinnedCPUs) > 0 {
 		fmt.Printf("Pinned:   %v\n", vm.PinnedCPUs)
 	}
+	if vm.PendingReason != "" {
+		fmt.Printf("Waiting:  %s\n", vm.PendingReason)
+	}
 	if vm.FailureReason != "" {
 		fmt.Printf("Failure:  %s\n", vm.FailureReason)
 	}
