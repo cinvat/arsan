@@ -73,18 +73,22 @@ type Node struct {
 	State          string    `json:"State"`
 	Enabled        bool      `json:"Enabled"`
 	Driver         string    `json:"Driver"`
+	IP             string    `json:"IP"`
 	Total          Resources `json:"Total"`
 	Available      Resources `json:"Available"`
+	PinnedCPUs     []int     `json:"PinnedCPUs"`
 	NotReadyReason string    `json:"NotReadyReason"`
 }
 
 type VirtualMachine struct {
-	ID       string `json:"ID"`
-	Name     string `json:"Name"`
-	State    string `json:"State"`
-	NodeID   string `json:"NodeID"`
-	ImageRef string `json:"ImageRef"`
-	Flavor   Flavor `json:"Flavor"`
+	ID            string `json:"ID"`
+	Name          string `json:"Name"`
+	State         string `json:"State"`
+	NodeID        string `json:"NodeID"`
+	ImageRef      string `json:"ImageRef"`
+	Flavor        Flavor `json:"Flavor"`
+	PinnedCPUs    []int  `json:"PinnedCPUs"`
+	FailureReason string `json:"FailureReason"`
 }
 
 type Client struct {

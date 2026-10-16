@@ -1,16 +1,16 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/spf13/cobra"
 )
 
 var getCmd = &cobra.Command{
-	Use:   "get (nodes|virtualmachines)",
-	Short: "List nodes or virtual machines",
+	// get stays short: one line per object, no long fields. IMAGE urls,
+	// NOTREADY reasons and pin lists live in describe.
+	Use:   "get (nodes|virtualmachines|flavors)",
+	Short: "List nodes, virtual machines or flavors",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		watch, _ := cmd.Flags().GetBool("watch")
@@ -36,49 +36,58 @@ var getCmd = &cobra.Command{
 			}
 			printVMs(vms)
 			return nil
+		case "flavors", "flavor", "fl":
+			flavors, err := c.GetFlavors()
+			if err != nil {
+				return err
+			}
+			printFlavors(flavors)
+			return nil
 		default:
-			return fmt.Errorf("unknown resource %q: nodes or virtualmachines", args[0])
+			return fmt.Errorf("unknown resource %q: nodes, virtualmachines or flavors", args[0])
 		}
 	},
 }
 
 func printNodes(nodes []Node) {
-	fmt.Printf("%-32s %-10s %-8s %-8s %s\n", "ID", "STATE", "ENGINE", "CPU", "REASON")
+	fmt.Printf("%-16s %-10s %-6s %-10s %-15s %s\n", "ID", "STATE", "CPU", "ENGINE", "IP", "NAME")
 	for _, n := range nodes {
-		fmt.Printf("%-32s %-10s %-8s %-8d %s\n",
-			n.ID, n.State, n.Driver, n.Total.CPU, n.NotReadyReason)
+		fmt.Printf("%-16s %-10s %-6d %-10s %-15s %s\n",
+			n.ID, n.State, n.Total.CPU, n.Driver, n.IP, n.Name)
 	}
 }
 
 func printVMs(vms []VirtualMachine) {
-	fmt.Printf("%-16s %-10s %-10s %-32s %s\n", "ID", "STATE", "NODE", "IMAGE", "NAME")
+	fmt.Printf("%-16s %-10s %-10s %-10s %s\n", "ID", "STATE", "NODE", "FLAVOR", "NAME")
 	for _, vm := range vms {
-		fmt.Printf("%-16s %-10s %-10s %-32s %s\n",
-			vm.ID, vm.State, vm.NodeID, vm.ImageRef, vm.Name)
+		fmt.Printf("%-16s %-10s %-10s %-10s %s\n",
+			vm.ID, vm.State, vm.NodeID, vm.Flavor.Name, vm.Name)
 	}
 }
 
-// watchVMs polls until interrupted. Nodes have a real stream
-// (arsanctl watch nodes); VMs do not, so this re-lists on a tick and
-// reprints only when something changed.
-func watchVMs(c *Client) error {
-	var last []byte
-	for {
-		vms, err := c.GetVirtualMachines()
-		if err != nil {
-			return err
-		}
-		raw, err := json.Marshal(vms)
-		if err != nil {
-			return err
-		}
-		if string(raw) != string(last) {
-			last = raw
-			printVMs(vms)
-			fmt.Println("---")
-		}
-		time.Sleep(2 * time.Second)
+func printFlavors(flavors []Flavor) {
+	fmt.Printf("%-16s %-14s %-10s %-10s\n", "NAME", "VCPU", "MEMORY", "DISK")
+	for _, f := range flavors {
+		fmt.Printf("%-16s %-14s %-10s %-10s\n",
+			f.Name, vcpuShort(f.VCPU), mibShort(f.RAM), mibShort(f.Disk))
 	}
+}
+
+// vcpuShort renders topology compactly: 1s/2c/1t, with ! when dedicated.
+func vcpuShort(v VCPU) string {
+	s := fmt.Sprintf("%ds/%dc/%dt", v.Sockets, v.Cores, v.Threads)
+	if v.Dedicated {
+		s += "!"
+	}
+	return s
+}
+
+// mibShort renders MiB as MB or GB, whichever is whole.
+func mibShort(mib int) string {
+	if mib%1024 == 0 {
+		return fmt.Sprintf("%dGB", mib/1024)
+	}
+	return fmt.Sprintf("%dMB", mib)
 }
 
 func init() {
