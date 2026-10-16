@@ -83,22 +83,65 @@ func (r Resources) Add(other Resources) Resources {
 	return Resources{CPU: r.CPU + other.CPU, RAM: r.RAM + other.RAM, Disk: r.Disk + other.Disk}
 }
 
-// Flavor sizes a VM: vCPU topology, RAM in MiB, Disk in MiB.
+// Flavor sizes a VM's compute: vCPU topology and RAM in MiB. Storage is not
+// a flavor concern: a VM takes zero or more disks plus an optional cdrom,
+// each an individually named, sized and (de)attachable volume.
 type Flavor struct {
 	Name string
 	VCPU VCPU
 	RAM  int
-	Disk int
 }
 
+// Disk is one extra data disk on a VM, snapshotted at attach time. The root
+// disk is implicit — a thin overlay of the VM's image, always index 0 — so
+// extras start at 1. Index is assigned at attach and never reused, which is
+// what keeps detached gaps from renaming the survivors' files.
+type Disk struct {
+	// Name is operator-chosen ("data", "logs"), DNS_LABEL like everything
+	// else a human types. Index is the stable file number.
+	Name  string
+	Index int
+	// SizeMiB sizes a blank qcow2. With Image set it caps an overlay of that
+	// base instead; zero means "base virtual size", resolved by the engine.
+	SizeMiB int
+	// Image names another base to overlay. Empty provisions a blank disk.
+	Image string
+}
+
+// Boot devices, selected per VM. Rescue is attach-cdrom plus boot cdrom,
+// then start.
+const (
+	BootDisk  = "disk"
+	BootCDROM = "cdrom"
+)
+
 func (f Flavor) Resources() Resources {
-	return Resources{CPU: f.VCPU.Count(), RAM: f.RAM, Disk: f.Disk}
+	return Resources{CPU: f.VCPU.Count(), RAM: f.RAM}
+}
+
+// DiskResources sums extra disks for placement. The root overlay is thin —
+// it shares its base's clusters until written — so it reserves nothing and
+// only declared extras count against node disk.
+func DiskResources(disks []Disk) Resources {
+	var out Resources
+	for _, d := range disks {
+		out.Disk += d.SizeMiB
+	}
+	return out
 }
 
 type Instance struct {
-	ID         string
+	ID string
+	// Name and Namespace identify the VM like a pod: the hypervisor domain
+	// is named "<namespace>-<name>", never the internal id.
 	Name       string
+	Namespace  string
 	Flavor     Flavor
+	// Disks are the extra data volumes, snapshotted with their attach-time
+	// size and backing. The root overlay (image) and cdrom ride alongside.
+	Disks      []Disk
+	CdromImage string
+	BootDevice string
 	ImageRef   string
 	State      InstanceState
 	NodeID     string

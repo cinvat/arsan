@@ -21,6 +21,21 @@ type Driver interface {
 	// instance id. It is the reconcile input: control-plane states are never
 	// reported, and guests the driver does not know are simply absent.
 	Domains(ctx context.Context) ([]DomainStatus, error)
+	// UpdateDisks redefines a stopped domain with a new disk set: attach
+	// and detach on SHUTOFF, and boot-device switches, converge here.
+	UpdateDisks(ctx context.Context, req CreateRequest) error
+	// AttachDisk provisions one extra disk and plugs it in: live plus
+	// config when the guest runs, redefine when it does not.
+	AttachDisk(ctx context.Context, req CreateRequest, disk Disk) error
+	// DetachDisk unplugs one extra disk and deletes its file. The record
+	// already dropped it; the file delete always happens, so a shutoff
+	// detach cannot strand storage.
+	DetachDisk(ctx context.Context, req CreateRequest, disk Disk) error
+	// AttachCdrom plugs the iso read-only; DetachCdrom removes it. Boot
+	// order itself only changes at define time: attach, set boot to cdrom
+	// (a stopped redefine), start.
+	AttachCdrom(ctx context.Context, req CreateRequest) error
+	DetachCdrom(ctx context.Context, req CreateRequest, image string) error
 }
 
 // DomainStatus is one observed guest: the id arsan defined it under and its
@@ -34,7 +49,13 @@ type CreateRequest struct {
 	InstanceID string
 	NodeID     string
 	Name       string
+	Namespace  string
 	Flavor     Flavor
+	// Disks, CdromImage and BootDevice carry the VM's storage: extras indexed
+	// from 1, an optional read-only iso, and which of disk/cdrom boots.
+	Disks      []Disk
+	CdromImage string
+	BootDevice string
 	// PinnedCPUs carries the scheduler's exclusive CPUs for a dedicated
 	// flavor. Empty for shared flavors; the engine pins only what is here.
 	PinnedCPUs []int
@@ -106,8 +127,9 @@ type NodeStore interface {
 // ========== Service Interfaces ==========
 
 type CreateInstanceRequest struct {
-	Name     string `json:"name"`
-	ImageRef string `json:"image_ref"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	ImageRef  string `json:"image_ref"`
 	// FlavorRef names a stored flavor. It is the preferred way to size a VM;
 	// the instance keeps a snapshot of the flavor's resources at create time,
 	// so later flavor edits do not resize existing VMs.
@@ -115,6 +137,22 @@ type CreateInstanceRequest struct {
 	// Flavor is the legacy inline sizing, kept for back-compat. When FlavorRef
 	// is set it wins and Flavor is ignored.
 	Flavor Flavor `json:"flavor"`
+	// Disks are extra data volumes (root is the image overlay, always index
+	// 0). CdromImage attaches an iso read-only. BootDevice is BootDisk or
+	// BootCDROM and selects what boots; a rescue is attach-cdrom plus boot
+	// cdrom, then start.
+	Disks      []CreateDiskRequest `json:"disks"`
+	CdromImage string              `json:"cdrom_image"`
+	BootDevice string              `json:"boot_device"`
+}
+
+// CreateDiskRequest sizes one extra data disk. Size is required ("10GB");
+// Image optionally names another base to overlay instead of provisioning
+// blank. Indexes are assigned at create, starting at 1.
+type CreateDiskRequest struct {
+	Name  string   `json:"name"`
+	Size  Quantity `json:"size"`
+	Image string   `json:"image"`
 }
 
 // FlavorStore persists named flavors. Flavors are immutable after creation:
@@ -130,7 +168,6 @@ type CreateFlavorRequest struct {
 	Name   string   `json:"name"`
 	VCPU   VCPU     `json:"vcpu"`
 	Memory Quantity `json:"memory"`
-	Disk   Quantity `json:"disk"`
 }
 
 type FlavorService interface {
@@ -148,11 +185,17 @@ type InstanceService interface {
 	Start(ctx context.Context, id string) error
 	Stop(ctx context.Context, id string) error
 	Migrate(ctx context.Context, id, targetNodeID string) error
+	AttachDisk(ctx context.Context, id string, disk CreateDiskRequest) error
+	DetachDisk(ctx context.Context, id, name string) error
+	AttachCdrom(ctx context.Context, id, image string) error
+	DetachCdrom(ctx context.Context, id string) error
+	SetBootDevice(ctx context.Context, id, device string) error
 }
 
 type PlacementRequest struct {
 	InstanceID     string
 	Flavor         Flavor
+	Disks          []Disk
 	ImageRef       string
 	NodeID         string
 	ExcludeNodeIDs []string
