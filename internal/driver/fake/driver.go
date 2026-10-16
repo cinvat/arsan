@@ -132,24 +132,16 @@ func (d *Driver) Migrate(ctx context.Context, id, targetNodeID string) error {
 
 // Storage ops are no-ops: the fake engine has no files, only records. They
 // succeed so lifecycle tests exercise the compute paths, not libvirt.
-func (d *Driver) UpdateDisks(ctx context.Context, req core.CreateRequest) error {
-	return d.take("UpdateDisks")
+func (d *Driver) UpdateVolumes(ctx context.Context, req core.CreateRequest) error {
+	return d.take("UpdateVolumes")
 }
 
-func (d *Driver) AttachDisk(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
-	return d.take("AttachDisk")
+func (d *Driver) AttachVolume(ctx context.Context, req core.CreateRequest, vol core.AttachedVolume) error {
+	return d.take("AttachVolume")
 }
 
-func (d *Driver) DetachDisk(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
-	return d.take("DetachDisk")
-}
-
-func (d *Driver) AttachCdrom(ctx context.Context, req core.CreateRequest) error {
-	return d.take("AttachCdrom")
-}
-
-func (d *Driver) DetachCdrom(ctx context.Context, req core.CreateRequest, image string) error {
-	return d.take("DetachCdrom")
+func (d *Driver) DetachVolume(ctx context.Context, req core.CreateRequest, vol core.AttachedVolume) error {
+	return d.take("DetachVolume")
 }
 
 func (d *Driver) Usage(ctx context.Context) (core.Resources, error) {

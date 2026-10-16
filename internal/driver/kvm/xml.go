@@ -35,24 +35,28 @@ func domainName(req core.CreateRequest) string {
 	return core.DomainName(req.Namespace, req.Name)
 }
 
-// domainXML renders a minimal KVM guest: virtio disk and NIC, no graphics.
+// domainXML renders a minimal KVM guest: virtio disks and NIC, no graphics.
 // RAM is MiB in the api and KiB in libvirt.
 //
 // vCPU topology is always rendered: a bare count leaves the guest layout to
 // QEMU's default, which silently differs from what the flavor promised.
 // Dedicated flavors additionally pin each vCPU to its exclusive host CPU and
 // pin the emulator threads alongside, so nothing else is scheduled there.
-func domainXML(name string, req core.CreateRequest) string {
+//
+// files maps volume id to the provisioned qcow2 to use as its source, bases
+// to the resolved base the file overlays (absent for blank disks). Isos are
+// never provisioned: the cdrom points at the resolved base directly.
+func domainXML(name string, req core.CreateRequest, files, bases map[string]string) string {
 	v := req.Flavor.VCPU
 	// The instance id rides in metadata because id-only ops (start, stop,
 	// delete) cannot derive "<namespace>-<name>" from the id alone. Name
 	// stays human-readable; metadata stays the lookup key.
 	//
-	// Volumes ride along too: every qcow2 this driver provisioned (root
-	// overlay plus extras, never bases or isos) is listed file by file, so
-	// Delete removes exactly what Create made, even across restarts.
+	// Volumes ride along too: every qcow2 this driver provisioned is listed
+	// file by file, so Delete removes exactly what Create made, even across
+	// restarts. Bases and isos stay out: shared storage is never removed.
 	meta := fmt.Sprintf(`<metadata><arsan:instance xmlns:arsan='https://cinvat.github.io/arsan' id='%s'/>%s</metadata>`,
-		req.InstanceID, volumesMeta(req))
+		req.InstanceID, volumesMeta(req, files))
 	topology := fmt.Sprintf(`<cpu><topology sockets='%d' cores='%d' threads='%d'/></cpu>`,
 		v.Sockets, v.Cores, v.Threads)
 	pinning := ""
@@ -90,95 +94,130 @@ func domainXML(name string, req core.CreateRequest) string {
     </console>
   </devices>
 </domain>
-`, name, meta, req.Flavor.RAM*1024, v.Count(), pinning, topology, storageXML(req))
+`, name, meta, req.Flavor.RAM*1024, v.Count(), pinning, topology, storageXML(req, files, bases))
 }
 
-// dirFor places provisioned files next to the base image they derive from:
+// volumeDir places a provisioned file next to the base it derives from:
 // same filesystem, so overlays stay cheap, and no new path to configure.
-func dirFor(req core.CreateRequest) string {
-	if dir := filepath.Dir(req.ImageRef); dir != "" {
-		return dir
+// Blank disks land next to the first base on hand, else the work directory.
+func volumeDir(base, fallback string) string {
+	if base != "" {
+		if dir := filepath.Dir(base); dir != "" {
+			return dir
+		}
+	}
+	if fallback != "" {
+		if dir := filepath.Dir(fallback); dir != "" {
+			return dir
+		}
 	}
 	return "."
 }
 
-// volumeBase is the file stem every owned volume shares. Legacy rows without
-// a namespace keep the arsan-<id> stem, matching their domain name.
-func volumeBase(req core.CreateRequest) string {
-	if req.Namespace == "" {
-		return "arsan-" + req.InstanceID
+// volumeFile names the qcow2 this driver owns for one volume: namespace,
+// volume name and an id fragment. Stable across detaches (it keys off the
+// volume, never its position), unique across renames (the id never repeats),
+// and traceable in ls. Bases and isos are never renamed or moved.
+func volumeFile(dir string, vol core.Volume) string {
+	id := vol.ID
+	if len(id) > 12 {
+		id = id[len(id)-12:]
 	}
-	return core.DomainName(req.Namespace, req.Name)
+	return filepath.Join(dir, fmt.Sprintf("%s-%s.qcow2", vol.Name, id))
 }
 
-// volumePath names the qcow2 this driver owns for one disk: base plus stable
-// file index. Bases and isos are never renamed or moved.
-func volumePath(dir string, req core.CreateRequest, index int) string {
-	return filepath.Join(dir, fmt.Sprintf("%s-%d.qcow2", volumeBase(req), index))
+// bootOrder returns the boot element for a device: order 1 on the volume
+// carrying boot index 0, nothing otherwise. At most one volume boots;
+// records enforce that, the renderer trusts it.
+func bootOrder(idx *int) string {
+	if idx != nil && *idx == 0 {
+		return "\n      <boot order='1'/>"
+	}
+	return ""
 }
 
-// rootVolume is the thin overlay of the base image, always index 0.
-func rootVolume(req core.CreateRequest) string {
-	return volumePath(dirFor(req), req, 0)
-}
-
-// dataVolume names extra d, indexed from 1 in creation order. Indexes are
-// never reused, so detaching disk 1 does not rename disk 2's file.
-func dataVolume(req core.CreateRequest, d core.Disk) string {
-	return volumePath(dirFor(req), req, d.Index)
-}
-
-// targetDev maps a file index onto a virtio letter: 0 is vda, 1 is vdb and
-// so on. Index-derived, never slice-derived, so the letter survives detaches.
-func targetDev(index int) string {
-	return fmt.Sprintf("vd%c", 'a'+byte(index))
-}
-
-// volumesMeta lists every owned file for Delete. Only overlays and blank
-// provisioned disks appear here; the base and any iso stay out.
-func volumesMeta(req core.CreateRequest) string {
+// volumesMeta lists every owned file for Delete: one entry per provisioned
+// qcow2. Bases and isos stay out, so deleting a VM never removes shared
+// storage even though the metadata travels in the domain.
+func volumesMeta(req core.CreateRequest, files map[string]string) string {
+	byID := make(map[string]core.AttachedVolume, len(req.Volumes))
+	for _, att := range req.Volumes {
+		byID[att.Volume.ID] = att
+	}
+	ids := make([]string, 0, len(files))
+	for id := range files {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf(`<arsan:volume file='%s'/>`, rootVolume(req)))
-	for _, d := range req.Disks {
-		b.WriteString(fmt.Sprintf(`<arsan:volume file='%s'/>`, dataVolume(req, d)))
+	for _, id := range ids {
+		del := "false"
+		if byID[id].Volume.DeleteOnTermination {
+			del = "true"
+		}
+		b.WriteString(fmt.Sprintf(`<arsan:volume file='%s' delete='%s'/>`, files[id], del))
 	}
 	return b.String()
+}
+
+// ownedVolume is one provisioned file plus whether VM delete removes it.
+type ownedVolume struct {
+	file   string
+	delete bool
 }
 
 // parseDomainVolumes reads back what volumesMeta wrote. The split's first
 // segment precedes any marker (it holds the instance element), so only the
 // segments after a marker carry a file path.
-func parseDomainVolumes(desc string) []string {
+func parseDomainVolumes(desc string) []ownedVolume {
 	segs := strings.Split(desc, "<arsan:volume file='")
-	var out []string
+	var out []ownedVolume
 	for _, seg := range segs[1:] {
-		if i := strings.IndexByte(seg, '\''); i > 0 {
-			out = append(out, seg[:i])
+		i := strings.IndexByte(seg, '\'')
+		if i <= 0 {
+			continue
 		}
+		out = append(out, ownedVolume{file: seg[:i], delete: strings.Contains(seg, "delete='true'")})
 	}
 	return out
 }
 
-// storageXML renders the root overlay, every extra disk and the optional
-// cdrom. Exactly one device carries boot order 1: the cdrom when boot says
-// so, else the root. Declaration order otherwise decides, KubeVirt-style.
-func storageXML(req core.CreateRequest) string {
+// storageXML renders every attached volume in attach order: qcow2 disks on
+// virtio, isos as read-only sata cdroms. The volume carrying boot index 0
+// gets boot order 1; the rest boot in attach order after it. Device names
+// come from the attachment record, never recomputed, so they survive
+// detaches.
+func storageXML(req core.CreateRequest, files, bases map[string]string) string {
 	var b strings.Builder
-	bootCD := req.BootDevice == core.BootCDROM && req.CdromImage != ""
-	boot := func(wantCD bool) string {
-		if (wantCD && bootCD) || (!wantCD && !bootCD) {
-			return "\n      <boot order='1'/>"
+	for i, att := range req.Volumes {
+		var dev string
+		if att.Volume.Cdrom {
+			// Prefer the resolved base, fall back to the raw image: an iso
+			// needs no provisioning map entry to render.
+			src := bases[att.Volume.ID]
+			if src == "" {
+				src = att.Volume.Image
+			}
+			dev = cdromDeviceXML(src, bootOrderOf(att.Volume.BootIndex))
+		} else {
+			dev = diskDeviceXML(att.Device, files[att.Volume.ID], bootOrderOf(att.Volume.BootIndex))
 		}
-		return ""
-	}
-	b.WriteString(diskDeviceXML("vda", rootVolume(req), boot(false)))
-	for _, d := range req.Disks {
-		b.WriteString("\n" + diskDeviceXML(targetDev(d.Index), dataVolume(req, d), ""))
-	}
-	if req.CdromImage != "" {
-		b.WriteString("\n" + cdromDeviceXML(req.CdromImage, boot(true)))
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(dev)
 	}
 	return b.String()
+}
+
+// bootOrderOf returns the boot element for an attachment: order 1 on boot
+// index 0, nothing otherwise. Records keep at most one bootable, set-boot
+// moves it, so the renderer never arbitrates.
+func bootOrderOf(idx *int) string {
+	if idx != nil && *idx == 0 {
+		return "\n      <boot order='1'/>"
+	}
+	return ""
 }
 
 // diskDeviceXML renders one virtio data disk. Live attach and detach build

@@ -58,12 +58,7 @@ func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
 }
 
 func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.InstanceInfo, error) {
-	resp, err := d.call(ctx, agent.Request{
-		Op: agent.OpCreate, InstanceID: req.InstanceID, NodeID: req.NodeID,
-		Name: req.Name, Namespace: req.Namespace, Flavor: req.Flavor, Disks: req.Disks,
-		CdromImage: req.CdromImage, BootDevice: req.BootDevice,
-		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
-	})
+	resp, err := d.call(ctx, fullRequest(agent.OpCreate, req))
 	if err != nil {
 		return core.InstanceInfo{}, err
 	}
@@ -105,54 +100,33 @@ func (d *Driver) Usage(ctx context.Context) (core.Resources, error) {
 	return resp.Usage, nil
 }
 
-func (d *Driver) UpdateDisks(ctx context.Context, req core.CreateRequest) error {
-	_, err := d.call(ctx, agent.Request{
-		Op: agent.OpUpdateDisks, InstanceID: req.InstanceID,
-		Name: req.Name, Namespace: req.Namespace, Flavor: req.Flavor, Disks: req.Disks,
-		CdromImage: req.CdromImage, BootDevice: req.BootDevice,
-		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
-	})
+func (d *Driver) UpdateVolumes(ctx context.Context, req core.CreateRequest) error {
+	_, err := d.call(ctx, fullRequest(agent.OpUpdateVolumes, req))
 	return err
 }
 
-func (d *Driver) AttachDisk(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
-	_, err := d.call(ctx, agent.Request{
-		Op: agent.OpAttachDisk, InstanceID: req.InstanceID,
-		Name: req.Name, Namespace: req.Namespace, Flavor: req.Flavor, Disks: req.Disks,
-		Disk: disk, CdromImage: req.CdromImage, BootDevice: req.BootDevice,
-		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
-	})
+func (d *Driver) AttachVolume(ctx context.Context, req core.CreateRequest, vol core.AttachedVolume) error {
+	r := fullRequest(agent.OpAttachVolume, req)
+	r.Volume = vol
+	_, err := d.call(ctx, r)
 	return err
 }
 
-func (d *Driver) DetachDisk(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
-	_, err := d.call(ctx, agent.Request{
-		Op: agent.OpDetachDisk, InstanceID: req.InstanceID,
-		Name: req.Name, Namespace: req.Namespace, Flavor: req.Flavor, Disks: req.Disks,
-		Disk: disk, CdromImage: req.CdromImage, BootDevice: req.BootDevice,
-		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
-	})
+func (d *Driver) DetachVolume(ctx context.Context, req core.CreateRequest, vol core.AttachedVolume) error {
+	r := fullRequest(agent.OpDetachVolume, req)
+	r.Volume = vol
+	_, err := d.call(ctx, r)
 	return err
 }
 
-func (d *Driver) AttachCdrom(ctx context.Context, req core.CreateRequest) error {
-	_, err := d.call(ctx, agent.Request{
-		Op: agent.OpAttachCdrom, InstanceID: req.InstanceID,
-		Name: req.Name, Namespace: req.Namespace, Flavor: req.Flavor, Disks: req.Disks,
-		CdromImage: req.CdromImage, BootDevice: req.BootDevice,
+// fullRequest carries the whole post-mutation record: the agent converges to
+// what it describes without ever reading the api.
+func fullRequest(op agent.Operation, req core.CreateRequest) agent.Request {
+	return agent.Request{
+		Op: op, InstanceID: req.InstanceID, NodeID: req.NodeID,
+		Name: req.Name, Namespace: req.Namespace, Flavor: req.Flavor, Volumes: req.Volumes,
 		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
-	})
-	return err
-}
-
-func (d *Driver) DetachCdrom(ctx context.Context, req core.CreateRequest, image string) error {
-	_, err := d.call(ctx, agent.Request{
-		Op: agent.OpDetachCdrom, InstanceID: req.InstanceID,
-		Name: req.Name, Namespace: req.Namespace, Flavor: req.Flavor, Disks: req.Disks,
-		CdromImage: req.CdromImage, BootDevice: req.BootDevice, DetachedImage: image,
-		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
-	})
-	return err
+	}
 }
 
 func (d *Driver) Domains(ctx context.Context) ([]core.DomainStatus, error) {

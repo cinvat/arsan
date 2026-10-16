@@ -156,9 +156,6 @@ func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
 // definition is replaced (never under a running guest).
 func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.InstanceInfo, error) {
 	info := core.InstanceInfo{ID: req.InstanceID, NodeID: req.NodeID, Driver: d.name}
-	if req.ImageRef == "" {
-		return core.InstanceInfo{}, fmt.Errorf("kvm: image_ref is required: %w", core.ErrRequestRejected)
-	}
 	// A dedicated flavor without exactly its vCPUs' worth of pins is a
 	// scheduler bug, not a placement to attempt: booting it floating would
 	// silently break the exclusivity the flavor promises.
@@ -166,15 +163,14 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 		return core.InstanceInfo{}, fmt.Errorf("kvm: dedicated flavor needs %d pins, got %d: %w",
 			req.Flavor.VCPU.Count(), len(req.PinnedCPUs), core.ErrRequestRejected)
 	}
-	disk, err := resolveImage(ctx, req.ImageRef)
+	// Resolve bases and provision owned files before defining anything:
+	// missing qemu-img or an unwritable dir fails here, before any domain
+	// exists to clean up.
+	files, bases, err := d.resolveStorage(ctx, req)
 	if err != nil {
 		return core.InstanceInfo{}, err
 	}
-	req.ImageRef = disk
-	// Provision owned volumes before defining: the root overlay plus every
-	// extra. Missing qemu-img or an unwritable images dir fails here, before
-	// any domain exists to clean up.
-	if err := d.provisionAll(ctx, req); err != nil {
+	if err := d.provisionAll(ctx, req, files, bases); err != nil {
 		return core.InstanceInfo{}, err
 	}
 	err = d.do(ctx, func() error {
@@ -197,7 +193,7 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 				return err
 			}
 		}
-		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req))
+		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req, files, bases))
 		if err != nil {
 			return err
 		}
@@ -297,8 +293,13 @@ func (d *Driver) Delete(ctx context.Context, id string) error {
 		if err := dom.Undefine(); err != nil {
 			return err
 		}
-		for _, f := range parseDomainVolumes(desc) {
-			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+		// Only files the record marked delete-on-terminate go: shared
+		// volumes outlive any one VM, and isos were never listed at all.
+		for _, vol := range parseDomainVolumes(desc) {
+			if !vol.delete {
+				continue
+			}
+			if err := os.Remove(vol.file); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		}
@@ -306,11 +307,18 @@ func (d *Driver) Delete(ctx context.Context, id string) error {
 	})
 }
 
-// UpdateDisks redefines a stopped domain with a new disk set: attach and
-// detach on SHUTOFF, and boot-device switches, all converge here. Provision
-// first so a failed qemu-img leaves the old definition alone.
-func (d *Driver) UpdateDisks(ctx context.Context, req core.CreateRequest) error {
+// UpdateVolumes redefines a stopped domain with a new volume set: attach and
+// detach on SHUTOFF, and boot moves, converge here. Provision first so a
+// failed qemu-img leaves the old definition alone.
+func (d *Driver) UpdateVolumes(ctx context.Context, req core.CreateRequest) error {
 	return d.do(ctx, func() error {
+		files, bases, err := d.resolveStorage(ctx, req)
+		if err != nil {
+			return err
+		}
+		if err := d.provisionAll(ctx, req, files, bases); err != nil {
+			return err
+		}
 		dom, err := d.lookup(req.InstanceID)
 		if err != nil {
 			return err
@@ -319,20 +327,17 @@ func (d *Driver) UpdateDisks(ctx context.Context, req core.CreateRequest) error 
 			return core.ErrInstanceNotFound
 		}
 		defer dom.Free()
-		if err := d.provisionMissing(ctx, req); err != nil {
-			return err
-		}
 		state, _, err := dom.GetState()
 		if err != nil {
 			return err
 		}
 		if state == libvirt.DOMAIN_RUNNING {
-			return fmt.Errorf("kvm: update disks of a running domain: stop it first: %w", core.ErrInvalidTransition)
+			return fmt.Errorf("kvm: update volumes of a running domain: stop it first: %w", core.ErrInvalidTransition)
 		}
 		if err := dom.Undefine(); err != nil {
 			return err
 		}
-		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req))
+		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req, files, bases))
 		if err != nil {
 			return err
 		}
@@ -341,12 +346,17 @@ func (d *Driver) UpdateDisks(ctx context.Context, req core.CreateRequest) error 
 	})
 }
 
-// AttachDisk provisions one extra disk and hotplugs it: live plus config
-// when the guest runs, redefine when it does not. The record already carries
-// the disk; the engine only converges the hypervisor to it.
-func (d *Driver) AttachDisk(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
+// AttachVolume provisions the volume's file and hotplugs it: live plus
+// config when the guest runs, redefine when it does not. The record already
+// carries the attachment; the engine only converges the hypervisor to it.
+// Isos need no file: they attach straight from the shared image.
+func (d *Driver) AttachVolume(ctx context.Context, req core.CreateRequest, att core.AttachedVolume) error {
 	return d.do(ctx, func() error {
-		if err := d.provisionVolume(ctx, req, disk); err != nil {
+		files, bases, err := d.resolveStorage(ctx, req)
+		if err != nil {
+			return err
+		}
+		if err := d.provisionVolume(ctx, att, files, bases); err != nil {
 			return err
 		}
 		dom, err := d.lookup(req.InstanceID)
@@ -362,20 +372,25 @@ func (d *Driver) AttachDisk(ctx context.Context, req core.CreateRequest, disk co
 			return err
 		}
 		if state != libvirt.DOMAIN_RUNNING {
-			return d.redefine(ctx, req)
+			return d.redefine(ctx, req, files, bases)
 		}
 		return dom.AttachDeviceFlags(
-			diskDeviceXML(targetDev(disk.Index), dataVolume(req, disk), ""),
+			d.deviceXML(att, files, bases, ""),
 			libvirt.DOMAIN_DEVICE_MODIFY_LIVE|libvirt.DOMAIN_DEVICE_MODIFY_CONFIG,
 		)
 	})
 }
 
-// DetachDisk removes one extra disk and deletes its file: live plus config
-// when the guest runs, redefine when it does not. The record already dropped
-// it; the file delete always happens, so a shutoff detach cannot strand storage.
-func (d *Driver) DetachDisk(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
+// DetachVolume unplugs the volume and deletes its file when the volume says
+// DeleteOnTermination (shared volumes and isos are never removed). The
+// record already dropped the attachment; the file delete always happens for
+// owned files, so a shutoff detach cannot strand storage.
+func (d *Driver) DetachVolume(ctx context.Context, req core.CreateRequest, att core.AttachedVolume) error {
 	return d.do(ctx, func() error {
+		files, bases, err := d.resolveStorage(ctx, req)
+		if err != nil {
+			return err
+		}
 		dom, err := d.lookup(req.InstanceID)
 		if err != nil {
 			return err
@@ -390,76 +405,40 @@ func (d *Driver) DetachDisk(ctx context.Context, req core.CreateRequest, disk co
 			}
 			if state == libvirt.DOMAIN_RUNNING {
 				if err := dom.DetachDeviceFlags(
-					diskDeviceXML(targetDev(disk.Index), dataVolume(req, disk), ""),
+					d.deviceXML(att, files, bases, ""),
 					libvirt.DOMAIN_DEVICE_MODIFY_LIVE|libvirt.DOMAIN_DEVICE_MODIFY_CONFIG,
 				); err != nil {
 					return err
 				}
-			} else if err := d.redefine(ctx, req); err != nil {
+			} else if err := d.redefine(ctx, req, files, bases); err != nil {
 				return err
 			}
 		}
-		if err := os.Remove(dataVolume(req, disk)); err != nil && !os.IsNotExist(err) {
-			return err
+		if !att.Volume.DeleteOnTermination {
+			return nil // shared volume or iso: the record, not the file, goes
+		}
+		if f, ok := files[att.Volume.ID]; ok {
+			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
 		return nil
 	})
 }
 
-// AttachCdrom hotplugs the iso read-only; DetachCdrom removes it. Boot order
-// itself only ever changes at define time, so booting the rescue image is
-// attach, set boot to cdrom (a stopped redefine), start.
-func (d *Driver) AttachCdrom(ctx context.Context, req core.CreateRequest) error {
-	return d.do(ctx, func() error {
-		dom, err := d.lookup(req.InstanceID)
-		if err != nil {
-			return err
-		}
-		if dom == nil {
-			return core.ErrInstanceNotFound
-		}
-		defer dom.Free()
-		state, _, err := dom.GetState()
-		if err != nil {
-			return err
-		}
-		if state != libvirt.DOMAIN_RUNNING {
-			return d.redefine(ctx, req)
-		}
-		return dom.AttachDeviceFlags(
-			cdromDeviceXML(req.CdromImage, ""),
-			libvirt.DOMAIN_DEVICE_MODIFY_LIVE|libvirt.DOMAIN_DEVICE_MODIFY_CONFIG,
-		)
-	})
-}
-
-func (d *Driver) DetachCdrom(ctx context.Context, req core.CreateRequest, image string) error {
-	return d.do(ctx, func() error {
-		dom, err := d.lookup(req.InstanceID)
-		if err != nil {
-			return err
-		}
-		if dom == nil {
-			return nil
-		}
-		defer dom.Free()
-		state, _, err := dom.GetState()
-		if err != nil {
-			return err
-		}
-		if state == libvirt.DOMAIN_RUNNING {
-			return dom.DetachDeviceFlags(
-				cdromDeviceXML(image, ""),
-				libvirt.DOMAIN_DEVICE_MODIFY_LIVE|libvirt.DOMAIN_DEVICE_MODIFY_CONFIG,
-			)
-		}
-		return d.redefine(ctx, req)
-	})
+// deviceXML renders one attach/detach snippet, identical to what the full
+// domain carries: DetachDevice matches on the XML it is given, so live ops
+// and defines must agree byte for byte.
+func (d *Driver) deviceXML(att core.AttachedVolume, files, bases map[string]string, bootOrder string) string {
+	if att.Volume.Cdrom {
+		return cdromDeviceXML(bases[att.Volume.ID], bootOrder)
+	}
+	return diskDeviceXML(att.Device, files[att.Volume.ID], bootOrder)
 }
 
 // redefine swaps the definition for a freshly rendered one. The caller holds
 // the do-mutex and has checked the domain is not running.
-func (d *Driver) redefine(ctx context.Context, req core.CreateRequest) error {
+func (d *Driver) redefine(ctx context.Context, req core.CreateRequest, files, bases map[string]string) error {
 	dom, err := d.lookup(req.InstanceID)
 	if err != nil {
 		return err
@@ -468,10 +447,17 @@ func (d *Driver) redefine(ctx context.Context, req core.CreateRequest) error {
 		return core.ErrInstanceNotFound
 	}
 	defer dom.Free()
+	state, _, err := dom.GetState()
+	if err != nil {
+		return err
+	}
+	if state == libvirt.DOMAIN_RUNNING {
+		return fmt.Errorf("kvm: redefine a running domain: stop it first: %w", core.ErrInvalidTransition)
+	}
 	if err := dom.Undefine(); err != nil {
 		return err
 	}
-	dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req))
+	dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req, files, bases))
 	if err != nil {
 		return err
 	}
@@ -479,34 +465,57 @@ func (d *Driver) redefine(ctx context.Context, req core.CreateRequest) error {
 	return nil
 }
 
-// provisionAll creates every owned volume for a fresh build. Root overlays
-// its base; extras overlay their own base or provision blank. Existing files
-// are left alone, so a retried build is a no-op here too.
-func (d *Driver) provisionAll(ctx context.Context, req core.CreateRequest) error {
-	if err := d.provisionVolume(ctx, req, core.Disk{Index: 0, Image: req.ImageRef}); err != nil {
-		return err
+// resolveStorage maps every attached volume to its local file and base:
+// overlays resolve their base (URLs download once into the image cache),
+// blank disks need no base, isos point at the resolved image directly. Files
+// land next to the first base on hand; blank-only sets land in ".". Both maps
+// are keyed by volume id and fully deterministic, so attach, define and
+// detach agree without consulting the record.
+func (d *Driver) resolveStorage(ctx context.Context, req core.CreateRequest) (files, bases map[string]string, err error) {
+	files = make(map[string]string, len(req.Volumes))
+	bases = make(map[string]string, len(req.Volumes))
+	dir := "."
+	for _, att := range req.Volumes {
+		if att.Volume.Cdrom || att.Volume.Image == "" {
+			continue
+		}
+		p, rerr := resolveImage(ctx, att.Volume.Image)
+		if rerr != nil {
+			return nil, nil, rerr
+		}
+		bases[att.Volume.ID] = p
+		dir = volumeDir(p, dir)
 	}
-	return d.provisionMissing(ctx, req)
+	for _, att := range req.Volumes {
+		if att.Volume.Cdrom {
+			continue
+		}
+		files[att.Volume.ID] = volumeFile(dir, att.Volume)
+	}
+	return files, bases, nil
 }
 
-// provisionMissing creates files for extra disks that lack them, as opposed
-// to every file unconditionally — the common case on redefines.
-func (d *Driver) provisionMissing(ctx context.Context, req core.CreateRequest) error {
-	for _, disk := range req.Disks {
-		if err := d.provisionVolume(ctx, req, disk); err != nil {
+// provisionAll creates every owned file for a fresh build. Existing files
+// are left alone, so a retried build is a no-op here too.
+func (d *Driver) provisionAll(ctx context.Context, req core.CreateRequest, files, bases map[string]string) error {
+	for _, att := range req.Volumes {
+		if err := d.provisionVolume(ctx, att, files, bases); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// provisionVolume creates one qcow2 if absent: an overlay of Image, or a blank
-// disk of SizeMiB. A blank disk without a size is a request bug, reported
-// rather than guessed at.
-func (d *Driver) provisionVolume(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
-	path := rootVolume(req)
-	if disk.Index != 0 {
-		path = dataVolume(req, disk)
+// provisionVolume creates one qcow2 if absent: an overlay of its base, or a
+// blank disk of its size. A blank disk without a size is a request bug,
+// reported rather than guessed at.
+func (d *Driver) provisionVolume(ctx context.Context, att core.AttachedVolume, files, bases map[string]string) error {
+	if att.Volume.Cdrom {
+		return nil // isos are shared, never provisioned
+	}
+	path, ok := files[att.Volume.ID]
+	if !ok || path == "" {
+		return fmt.Errorf("kvm: no file for volume %s: %w", att.Volume.ID, core.ErrRequestRejected)
 	}
 	if _, err := os.Stat(path); err == nil {
 		return nil
@@ -515,13 +524,13 @@ func (d *Driver) provisionVolume(ctx context.Context, req core.CreateRequest, di
 		return fmt.Errorf("kvm: qemu-img not found in PATH: %w", err)
 	}
 	args := []string{"create", "-f", "qcow2"}
-	if disk.Image != "" {
-		args = append(args, "-F", "qcow2", "-b", disk.Image)
+	if base := bases[att.Volume.ID]; base != "" {
+		args = append(args, "-F", "qcow2", "-b", base)
 	} else {
-		if disk.SizeMiB <= 0 {
-			return fmt.Errorf("kvm: blank disk needs a size: %w", core.ErrRequestRejected)
+		if att.Volume.SizeMiB <= 0 {
+			return fmt.Errorf("kvm: blank volume %s needs a size: %w", att.Volume.ID, core.ErrRequestRejected)
 		}
-		args = append(args, qemuImgSize(disk.SizeMiB))
+		args = append(args, qemuImgSize(att.Volume.SizeMiB))
 	}
 	args = append(args, path)
 	if out, err := exec.CommandContext(ctx, "qemu-img", args...).CombinedOutput(); err != nil {

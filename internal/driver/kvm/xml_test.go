@@ -7,20 +7,36 @@ import (
 	"github.com/cinvat/arsan/internal/core"
 )
 
+func testVolume(id, name string, boot *int) core.AttachedVolume {
+	return core.AttachedVolume{Volume: core.Volume{
+		ID: id, Name: name, Namespace: "team-a",
+		SizeMiB: 10240, Image: "/var/lib/libvirt/images/base.qcow2",
+		BootIndex: boot, DeleteOnTermination: true,
+	}}
+}
+
 func TestDomainXML(t *testing.T) {
+	zero := 0
 	req := core.CreateRequest{
 		InstanceID: "i-1", Name: "web1", Namespace: "team-a",
-		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(2), RAM: 4},
-		ImageRef: "/var/lib/libvirt/images/base.qcow2",
+		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(2), RAM: 4},
+		Volumes: []core.AttachedVolume{
+			{Volume: core.Volume{ID: "vol-root", Name: "root", Namespace: "team-a", SizeMiB: 10240, Image: "/var/lib/libvirt/images/base.qcow2", BootIndex: &zero, DeleteOnTermination: true}, Device: "vda"},
+		},
 	}
-	xml := domainXML(domainName(req), req)
+	files := map[string]string{"vol-root": "/var/lib/libvirt/images/team-a-root-xyz.qcow2"}
+	bases := map[string]string{"vol-root": "/var/lib/libvirt/images/base.qcow2"}
+	xml := domainXML(domainName(req), req, files, bases)
 	for _, want := range []string{
 		"<name>team-a-web1</name>",
 		"<arsan:instance xmlns:arsan='https://cinvat.github.io/arsan' id='i-1'/>",
+		"<arsan:volume file='/var/lib/libvirt/images/team-a-root-xyz.qcow2' delete='true'/>",
 		"<memory unit='KiB'>4096</memory>", // 4 MiB in KiB
 		"<vcpu>2</vcpu>",
 		"<topology sockets='1' cores='2' threads='1'/>",
-		"<source file='/var/lib/libvirt/images/team-a-web1-0.qcow2'/>",
+		"<source file='/var/lib/libvirt/images/team-a-root-xyz.qcow2'/>",
+		"<target dev='vda' bus='virtio'/>",
+		"<boot order='1'/>",
 		"type='kvm'",
 		"<serial type='pty'>",
 		"<console type='pty'>",
@@ -37,16 +53,24 @@ func TestDomainXML(t *testing.T) {
 	if !ok || id != "i-1" {
 		t.Fatalf("parseDomainInstanceID = %q,%v, want i-1,true", id, ok)
 	}
+	got := parseDomainVolumes(xml)
+	if len(got) != 1 || got[0].file != "/var/lib/libvirt/images/team-a-root-xyz.qcow2" || !got[0].delete {
+		t.Fatalf("volumes = %+v, want the root with delete", got)
+	}
 }
 
 func TestDomainXMLDedicated(t *testing.T) {
-	xml := domainXML("arsan-i-2", core.CreateRequest{
+	zero := 0
+	req := core.CreateRequest{
 		InstanceID: "i-2",
 		Flavor: core.Flavor{Name: "m1.dedicated",
 			VCPU: core.VCPU{Sockets: 1, Cores: 2, Threads: 2, Dedicated: true}},
 		PinnedCPUs: []int{4, 5, 6, 7},
-		ImageRef:   "/var/lib/libvirt/images/base.qcow2",
-	})
+		Volumes: []core.AttachedVolume{
+			{Volume: core.Volume{ID: "vol-r", Name: "root", SizeMiB: 10240, Image: "base.qcow2", BootIndex: &zero}, Device: "vda"},
+		},
+	}
+	xml := domainXML("arsan-i-2", req, map[string]string{"vol-r": "r.qcow2"}, map[string]string{"vol-r": "base.qcow2"})
 	for _, want := range []string{
 		"<vcpu>4</vcpu>",
 		"<topology sockets='1' cores='2' threads='2'/>",
@@ -61,18 +85,23 @@ func TestDomainXMLDedicated(t *testing.T) {
 }
 
 func TestDomainXMLStorage(t *testing.T) {
+	zero := 0
 	req := core.CreateRequest{
 		InstanceID: "i-9", Name: "web1", Namespace: "team-a",
-		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 32},
-		Disks:    []core.Disk{{Name: "data", Index: 1, SizeMiB: 50 * 1024}},
-		ImageRef: "/var/lib/libvirt/images/base.qcow2",
+		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 32},
+		Volumes: []core.AttachedVolume{
+			{Volume: core.Volume{ID: "vol-root", Name: "root", SizeMiB: 10240, Image: "base.qcow2", BootIndex: &zero, DeleteOnTermination: true}, Device: "vda"},
+			{Volume: core.Volume{ID: "vol-data", Name: "data", SizeMiB: 50 * 1024, DeleteOnTermination: true}, Device: "vdb"},
+		},
 	}
-	xml := domainXML(domainName(req), req)
+	files := map[string]string{"vol-root": "/v/root.qcow2", "vol-data": "/v/data.qcow2"}
+	bases := map[string]string{"vol-root": "/var/lib/libvirt/images/base.qcow2"}
+	xml := domainXML(domainName(req), req, files, bases)
 	for _, want := range []string{
 		"<name>team-a-web1</name>",
-		"<source file='/var/lib/libvirt/images/team-a-web1-0.qcow2'/>",
+		"<source file='/v/root.qcow2'/>",
 		"<target dev='vda' bus='virtio'/>",
-		"<source file='/var/lib/libvirt/images/team-a-web1-1.qcow2'/>",
+		"<source file='/v/data.qcow2'/>",
 		"<target dev='vdb' bus='virtio'/>",
 		"<boot order='1'/>",
 	} {
@@ -83,17 +112,17 @@ func TestDomainXMLStorage(t *testing.T) {
 	if strings.Contains(xml, "cdrom") {
 		t.Errorf("no cdrom requested, none must render:\n%s", xml)
 	}
-	files := parseDomainVolumes(xml)
-	if len(files) != 2 {
-		t.Fatalf("volumes = %v, want root + data", files)
+	got := parseDomainVolumes(xml)
+	if len(got) != 2 {
+		t.Fatalf("volumes = %v, want root + data", got)
 	}
 
 	cd := req
-	cd.CdromImage = "/var/lib/libvirt/images/rescue.iso"
-	cd.BootDevice = core.BootCDROM
-	cdx := domainXML(domainName(cd), cd)
+	cd.Volumes = append(append([]core.AttachedVolume{}, req.Volumes...),
+		core.AttachedVolume{Volume: core.Volume{ID: "vol-cd", Name: "rescue", Cdrom: true, Image: "https://example.com/rescue.iso"}, Device: "vdd"})
+	cdx := domainXML(domainName(cd), cd, files, bases)
 	for _, want := range []string{
-		"<source file='/var/lib/libvirt/images/rescue.iso'/>",
+		"<source file='https://example.com/rescue.iso'/>",
 		"<target dev='sda' bus='sata'/>",
 		"<readonly/>",
 	} {
@@ -111,12 +140,12 @@ func TestPinsMatchDesc(t *testing.T) {
 		PinnedCPUs: []int{4, 5},
 		ImageRef:   "/var/lib/libvirt/images/base.qcow2",
 	}
-	if !pinsMatchDesc(domainXML("arsan-i-2", req), req) {
+	if !pinsMatchDesc(domainXML("arsan-i-2", req, nil, nil), req) {
 		t.Fatal("own rendering must match")
 	}
 	stale := req
 	stale.PinnedCPUs = []int{0, 1}
-	if pinsMatchDesc(domainXML("arsan-i-2", req), stale) {
+	if pinsMatchDesc(domainXML("arsan-i-2", req, nil, nil), stale) {
 		t.Fatal("different pins must not match")
 	}
 	shared := core.CreateRequest{Flavor: core.Flavor{VCPU: core.VCPUCount(2)}}
