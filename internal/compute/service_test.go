@@ -60,7 +60,7 @@ func pending(t *testing.T, st *memory.Store, name string) core.Instance {
 	return inst
 }
 
-// Build places, claims, creates and starts: PENDING straight to ACTIVE.
+// Build places, claims, creates and starts: PENDING straight to RUNNING.
 func TestBuildLifecycle(t *testing.T) {
 	svc, st, _ := setup(t)
 	ctx := context.Background()
@@ -73,8 +73,8 @@ func TestBuildLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != core.StateActive {
-		t.Fatalf("state = %s, want ACTIVE", got.State)
+	if got.State != core.StateRunning {
+		t.Fatalf("state = %s, want RUNNING", got.State)
 	}
 	if got.NodeID != "n-1" {
 		t.Fatalf("node = %s, want n-1", got.NodeID)
@@ -85,7 +85,7 @@ func TestBuildLifecycle(t *testing.T) {
 	}
 }
 
-// Stop and Start move ACTIVE <-> SHUTOFF through the engine.
+// Stop and Start move RUNNING <-> SHUTOFF through the engine.
 func TestStopStart(t *testing.T) {
 	svc, st, _ := setup(t)
 	ctx := context.Background()
@@ -103,8 +103,8 @@ func TestStopStart(t *testing.T) {
 	if err := svc.Start(ctx, "i-1"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	if got, _ := st.Get(ctx, "i-1"); got.State != core.StateActive {
-		t.Fatalf("state = %s, want ACTIVE", got.State)
+	if got, _ := st.Get(ctx, "i-1"); got.State != core.StateRunning {
+		t.Fatalf("state = %s, want RUNNING", got.State)
 	}
 }
 
@@ -157,6 +157,48 @@ func TestDeleteRemovesGuest(t *testing.T) {
 	}
 }
 
+// A placement failure queues instead of erroring: the VM stays PENDING with
+// the reason recorded, the generation counts the attempt, and the sweep
+// retries on its own. ERROR is reserved for control-plane failures.
+func TestScheduleFailureStaysPendingWithReason(t *testing.T) {
+	st := memory.New() // no nodes: nothing can ever fit
+	engine := fake.New()
+	driverFor := func(string) (core.Driver, error) { return engine, nil }
+	sched := scheduler.New(scheduler.Config{
+		Instances: st, Nodes: st, DriverFor: driverFor, Log: quiet{},
+	})
+	svc := New(Config{
+		Instances: st, Nodes: st, Scheduler: sched,
+		DriverFor: driverFor, Log: quiet{},
+	})
+	ctx := context.Background()
+	inst, err := st.Create(ctx, core.Instance{
+		ID: "i-1", Name: "i-1",
+		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
+		ImageRef: "cirros",
+		State:    core.StatePending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Build(ctx, inst); err == nil {
+		t.Fatal("build with nowhere to place must fail")
+	}
+	got, err := st.Get(ctx, "i-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != core.StatePending {
+		t.Fatalf("state = %s, want PENDING (queued, not broken)", got.State)
+	}
+	if got.PendingReason == "" {
+		t.Fatal("PENDING without a reason strands operators; the wait must be named")
+	}
+	if got.Generation != 1 {
+		t.Fatalf("generation = %d, want 1 attempt counted", got.Generation)
+	}
+}
+
 // A sweep retry rebuilds a stranded build instead of stranding it further.
 func TestSweepRebuildsStranded(t *testing.T) {
 	svc, st, _ := setup(t)
@@ -178,7 +220,7 @@ func TestSweepRebuildsStranded(t *testing.T) {
 	if err := svc.Build(ctx, inst); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
-	if got, _ := st.Get(ctx, "i-1"); got.State != core.StateActive {
-		t.Fatalf("state = %s, want ACTIVE after retry", got.State)
+	if got, _ := st.Get(ctx, "i-1"); got.State != core.StateRunning {
+		t.Fatalf("state = %s, want RUNNING after retry", got.State)
 	}
 }

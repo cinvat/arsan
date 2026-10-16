@@ -112,7 +112,7 @@ func (s *Service) Start(ctx context.Context, id string) error {
 	}); err != nil {
 		return err
 	}
-	_, err = s.cfg.Instances.Transition(ctx, id, core.StateShutoff, core.StateActive)
+	_, err = s.cfg.Instances.Transition(ctx, id, core.StateShutoff, core.StateRunning)
 	return err
 }
 
@@ -121,7 +121,7 @@ func (s *Service) Stop(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if inst.State != core.StateActive {
+	if inst.State != core.StateRunning {
 		return fmt.Errorf("stop: %w", core.ErrInvalidTransition)
 	}
 
@@ -131,7 +131,7 @@ func (s *Service) Stop(ctx context.Context, id string) error {
 		return err
 	}
 
-	_, err = s.cfg.Instances.Transition(ctx, id, core.StateActive, core.StateShutoff)
+	_, err = s.cfg.Instances.Transition(ctx, id, core.StateRunning, core.StateShutoff)
 	return err
 }
 
@@ -140,7 +140,7 @@ func (s *Service) Migrate(ctx context.Context, id, targetNodeID string) error {
 	if err != nil {
 		return err
 	}
-	if inst.State != core.StateActive {
+	if inst.State != core.StateRunning {
 		return fmt.Errorf("migrate: %w", core.ErrInvalidTransition)
 	}
 
@@ -149,7 +149,7 @@ func (s *Service) Migrate(ctx context.Context, id, targetNodeID string) error {
 	})
 }
 
-// Build drives a PENDING instance to ACTIVE: schedule, claim, create on the
+// Build drives a PENDING instance to RUNNING: schedule, claim, create on the
 // engine, start, activate.
 //
 // This is the entry point for a command-bus handler. It is idempotent in the way
@@ -170,10 +170,10 @@ func (s *Service) build(ctx context.Context, id string) error {
 		InstanceID: inst.ID,
 		Flavor:     inst.Flavor,
 		ImageRef:   inst.ImageRef,
+		Generation: inst.Generation,
 	})
 	if err != nil {
-		s.fail(ctx, id, core.StatePending, err)
-		return err
+		return s.pending(ctx, inst, err)
 	}
 
 	inst, err = s.cfg.Instances.Transition(ctx, id, core.StatePending, core.StateScheduling)
@@ -206,8 +206,22 @@ func (s *Service) build(ctx context.Context, id string) error {
 		return fmt.Errorf("enter building: %w", err)
 	}
 
-	_, err = s.cfg.Instances.Transition(ctx, id, core.StateBuilding, core.StateActive)
+	_, err = s.cfg.Instances.Transition(ctx, id, core.StateBuilding, core.StateRunning)
 	return err
+}
+
+// pending records why placement did not happen and leaves the instance
+// queued. Unlike fail, nothing is broken: the sweep retries on its own, the
+// generation counts attempts, and PendingReason tells an operator what the
+// next attempt is waiting on. A failed bus publish still surfaces, because
+// the caller was promised a 202 for queued work.
+func (s *Service) pending(ctx context.Context, inst core.Instance, cause error) error {
+	inst.PendingReason = cause.Error()
+	inst.Generation++
+	if _, err := s.cfg.Instances.Update(ctx, inst); err != nil {
+		return fmt.Errorf("record pending %s: %w", inst.ID, err)
+	}
+	return fmt.Errorf("build %s: %w", inst.ID, cause)
 }
 
 func (s *Service) fail(ctx context.Context, id string, from core.InstanceState, cause error) error {
@@ -253,6 +267,15 @@ func (s *Service) Reconcile(ctx context.Context) error {
 		if _, err := s.cfg.Instances.Transition(ctx, i.ID, i.State, core.StatePending); err != nil {
 			s.cfg.Log.Warn("sweep", "instance", i.ID, "err", err)
 			continue
+		}
+		// A reset is a fresh queueing: the old wait reason belonged to an
+		// attempt that died, and the rebuild records its own. Re-read first:
+		// Update refuses state changes, and i still carries the stale one.
+		if cur, err := s.cfg.Instances.Get(ctx, i.ID); err == nil {
+			cur.PendingReason = ""
+			if _, err := s.cfg.Instances.Update(ctx, cur); err != nil {
+				s.cfg.Log.Warn("sweep clear reason", "instance", i.ID, "err", err)
+			}
 		}
 		if err := s.cfg.Instances.ReleaseReservations(ctx, i.ID, i.NodeID); err != nil {
 			s.cfg.Log.Error("sweep release", "instance", i.ID, "err", err)
