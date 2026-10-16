@@ -17,6 +17,11 @@
         "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
       },
       "enabled": true
+    },
+    "kubevirt": {
+      "type": "local",
+      "command": ["npx", "-y", "mcp-server-kubernetes"],
+      "enabled": true
     }
   }
 }
