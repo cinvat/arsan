@@ -28,7 +28,11 @@ var describeCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			describeVM(vm)
+			volumes, err := c.GetVolumes()
+			if err != nil {
+				return err
+			}
+			describeVM(vm, volumes)
 			return nil
 		case "flavors", "flavor", "fl":
 			f, err := c.findFlavor(args[1])
@@ -37,8 +41,16 @@ var describeCmd = &cobra.Command{
 			}
 			describeFlavor(f)
 			return nil
+		case "volumes", "volume", "vol", "vols":
+			ns, _ := cmd.Flags().GetString("namespace")
+			v, err := c.findVolume(ns, args[1])
+			if err != nil {
+				return err
+			}
+			describeVolume(v)
+			return nil
 		default:
-			return fmt.Errorf("unknown resource %q: node, vm or flavor", args[0])
+			return fmt.Errorf("unknown resource %q: node, vm, flavor or volume", args[0])
 		}
 	},
 }
@@ -88,7 +100,13 @@ func describeNode(n Node) {
 	}
 }
 
-func describeVM(vm VirtualMachine) {
+// describedVolume joins an attachment with its row for display.
+type describedVolume struct {
+	att VolumeAttachment
+	vol Volume
+}
+
+func describeVM(vm VirtualMachine, all []Volume) {
 	fmt.Printf("Name:     %s\n", vm.Name)
 	fmt.Printf("Namespace: %s\n", vm.Namespace)
 	fmt.Printf("ID:       %s\n", vm.ID)
@@ -97,11 +115,38 @@ func describeVM(vm VirtualMachine) {
 	fmt.Printf("Image:    %s\n", vm.ImageRef)
 	fmt.Printf("Flavor:   %s (%s, memory %s)\n",
 		vm.Flavor.Name, vcpuLong(vm.Flavor.VCPU), mibShort(vm.Flavor.RAM))
-	for _, d := range vm.Disks {
-		fmt.Printf("Disk:     %s (%s, %s)\n", d.Name, mibShort(d.SizeMiB), dash(d.Image))
+	byID := make(map[string]Volume, len(all))
+	for _, v := range all {
+		byID[v.ID] = v
 	}
-	if vm.CdromImage != "" {
-		fmt.Printf("Cdrom:    %s (boot: %s)\n", vm.CdromImage, vm.BootDevice)
+	var vols []describedVolume
+	for _, att := range vm.Volumes {
+		v, ok := byID[att.VolumeID]
+		if !ok {
+			continue // record deleted out from under the attachment
+		}
+		vols = append(vols, describedVolume{att: att, vol: v})
+	}
+	for _, wd := range vols {
+		boot := ""
+		if wd.att.BootIndex != nil {
+			boot = fmt.Sprintf(", boots %d", *wd.att.BootIndex)
+		}
+		kind := "disk"
+		if wd.vol.Cdrom {
+			kind = "cdrom"
+		}
+		detail := fmt.Sprintf("%s %s %s", wd.att.Device, kind, wd.vol.Name)
+		if wd.vol.Image != "" {
+			detail = fmt.Sprintf("%s from %s", detail, wd.vol.Image)
+		}
+		if wd.vol.SizeMiB > 0 {
+			detail = fmt.Sprintf("%s, %s", detail, mibShort(wd.vol.SizeMiB))
+		}
+		if !wd.vol.DeleteOnTermination {
+			detail += ", shared"
+		}
+		fmt.Printf("Volume:   %s%s\n", detail, boot)
 	}
 	if len(vm.PinnedCPUs) > 0 {
 		fmt.Printf("Pinned:   %v\n", vm.PinnedCPUs)
@@ -112,6 +157,22 @@ func describeVM(vm VirtualMachine) {
 	if vm.FailureReason != "" {
 		fmt.Printf("Failure:  %s\n", vm.FailureReason)
 	}
+}
+
+func describeVolume(v Volume) {
+	fmt.Printf("Name:     %s\n", v.Name)
+	fmt.Printf("Namespace: %s\n", v.Namespace)
+	fmt.Printf("ID:       %s\n", v.ID)
+	fmt.Printf("Size:     %s\n", mibShort(v.SizeMiB))
+	fmt.Printf("Image:    %s\n", dash(v.Image))
+	fmt.Printf("Cdrom:    %t\n", v.Cdrom)
+	state := string(v.State)
+	if v.State == "" {
+		state = "available"
+	}
+	fmt.Printf("State:    %s\n", state)
+	fmt.Printf("Attached: %s\n", dash(v.AttachedTo))
+	fmt.Printf("DeleteOnTermination: %t\n", v.DeleteOnTermination)
 }
 
 func describeFlavor(f Flavor) {

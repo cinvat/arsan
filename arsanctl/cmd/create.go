@@ -31,8 +31,16 @@ var createCmd = &cobra.Command{
 				fmt.Printf("flavor/%s created\n", f.Name)
 				continue
 			}
+			if m.Kind == "Volume" {
+				v, err := c.CreateVolume(m.Metadata.Name, manifestNamespace(m), m.Spec.Size, m.Spec.Image, m.Spec.Cdrom, m.Spec.BootIndex, m.Spec.DeleteOnTermination)
+				if err != nil {
+					return fmt.Errorf("%s: %w", m.Metadata.Name, err)
+				}
+				fmt.Printf("volume/%s/%s created\n", v.Namespace, v.Name)
+				continue
+			}
 			ref, inline := flavorOf(m)
-			vm, err := c.CreateVirtualMachine(manifestNamespace(m), m.Metadata.Name, m.Spec.Image, ref, inline, m.Spec.Disks, m.Spec.Cdrom, m.Spec.Boot)
+			vm, err := c.CreateVirtualMachine(manifestNamespace(m), m.Metadata.Name, m.Spec.Image, ref, inline, m.Spec.Volumes)
 			if err != nil {
 				return fmt.Errorf("%s/%s: %w", manifestNamespace(m), m.Metadata.Name, err)
 			}
@@ -54,14 +62,26 @@ var deleteCmd = &cobra.Command{
 				return err
 			}
 			for _, m := range manifests {
-				vm, err := c.findVM(manifestNamespace(m), m.Metadata.Name)
-				if err != nil {
-					return err
+				switch m.Kind {
+				case "Volume":
+					v, err := c.findVolume(manifestNamespace(m), m.Metadata.Name)
+					if err != nil {
+						return err
+					}
+					if err := c.DeleteVolume(v.ID); err != nil {
+						return fmt.Errorf("%s/%s: %w", v.Namespace, m.Metadata.Name, err)
+					}
+					fmt.Printf("volume/%s/%s deleted\n", v.Namespace, m.Metadata.Name)
+				default:
+					vm, err := c.findVM(manifestNamespace(m), m.Metadata.Name)
+					if err != nil {
+						return err
+					}
+					if err := c.DeleteVirtualMachine(vm.ID); err != nil {
+						return fmt.Errorf("%s/%s: %w", vm.Namespace, m.Metadata.Name, err)
+					}
+					fmt.Printf("virtualmachine/%s/%s deleted\n", vm.Namespace, m.Metadata.Name)
 				}
-				if err := c.DeleteVirtualMachine(vm.ID); err != nil {
-					return fmt.Errorf("%s/%s: %w", vm.Namespace, m.Metadata.Name, err)
-				}
-				fmt.Printf("virtualmachine/%s/%s deleted\n", vm.Namespace, m.Metadata.Name)
 			}
 			return nil
 		}
@@ -111,11 +131,24 @@ var applyCmd = &cobra.Command{
 				fmt.Printf("flavor/%s created\n", f.Name)
 				continue
 			}
+			if m.Kind == "Volume" {
+				v, err := c.findVolume(manifestNamespace(m), m.Metadata.Name)
+				if err != nil {
+					created, cerr := c.CreateVolume(m.Metadata.Name, manifestNamespace(m), m.Spec.Size, m.Spec.Image, m.Spec.Cdrom, m.Spec.BootIndex, m.Spec.DeleteOnTermination)
+					if cerr != nil {
+						return fmt.Errorf("%s: %w", m.Metadata.Name, cerr)
+					}
+					fmt.Printf("volume/%s/%s created\n", created.Namespace, created.Name)
+					continue
+				}
+				fmt.Printf("volume/%s/%s unchanged\n", v.Namespace, v.Name)
+				continue
+			}
 			ref, inline := flavorOf(m)
 			ns := manifestNamespace(m)
 			vm, err := c.findVM(ns, m.Metadata.Name)
 			if err != nil {
-				created, cerr := c.CreateVirtualMachine(ns, m.Metadata.Name, m.Spec.Image, ref, inline, m.Spec.Disks, m.Spec.Cdrom, m.Spec.Boot)
+				created, cerr := c.CreateVirtualMachine(ns, m.Metadata.Name, m.Spec.Image, ref, inline, m.Spec.Volumes)
 				if cerr != nil {
 					return fmt.Errorf("%s/%s: %w", ns, m.Metadata.Name, cerr)
 				}
@@ -129,7 +162,7 @@ var applyCmd = &cobra.Command{
 			if err := c.DeleteVirtualMachine(vm.ID); err != nil {
 				return fmt.Errorf("%s/%s: %w", vm.Namespace, m.Metadata.Name, err)
 			}
-			created, err := c.CreateVirtualMachine(ns, m.Metadata.Name, m.Spec.Image, ref, inline, m.Spec.Disks, m.Spec.Cdrom, m.Spec.Boot)
+			created, err := c.CreateVirtualMachine(ns, m.Metadata.Name, m.Spec.Image, ref, inline, m.Spec.Volumes)
 			if err != nil {
 				return fmt.Errorf("%s/%s: %w", ns, m.Metadata.Name, err)
 			}

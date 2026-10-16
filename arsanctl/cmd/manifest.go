@@ -18,7 +18,15 @@ import (
 //	spec:
 //	  vcpu: {sockets: 1, cores: 2, threads: 1}  # or vcpu: 2 (legacy count)
 //	  memory: 32MB  # or 2GB; only MB and GB
-//	  disk: 10GB
+//	---
+//	apiVersion: v1alpha1
+//	kind: Volume
+//	metadata:
+//	  name: data
+//	  namespace: team-a
+//	spec:
+//	  size: 50GB
+//	  deleteOnTermination: true
 //	---
 //	apiVersion: v1alpha1
 //	kind: VirtualMachine
@@ -26,8 +34,12 @@ import (
 //	  name: web1
 //	  namespace: team-a   # optional, defaults to "default"
 //	spec:
-//	  image: https://example.com/base.qcow2   # or a host-local qcow2 path
+//	  image: https://example.com/base.qcow2   # root base; omit if volumes boot
 //	  flavorRef: m1
+//	  volumes:
+//	  - {name: data, size: 50GB}               # inline: provision at create
+//	  - {volume_id: vol-abc123}                # or claim a prepared volume
+//	  - {name: rescue, image: rescue.iso, cdrom: true}   # read-only iso
 type manifest struct {
 	APIVersion string `yaml:"apiVersion"`
 	Kind       string `yaml:"kind"`
@@ -43,11 +55,16 @@ type manifest struct {
 		Flavor Flavor `yaml:"flavor"`
 		VCPU   VCPU   `yaml:"vcpu"`
 		Memory string `yaml:"memory"`
-		// Disks are extra data volumes, each {name, size[, image]}.
-		Disks []DiskRequest `yaml:"disks"`
-		// Cdrom attaches an iso read-only. Boot selects disk or cdrom.
-		Cdrom string `yaml:"cdrom"`
-		Boot  string `yaml:"boot"`
+		// Volumes attaches storage at create: inline {name, size[, image,
+		// cdrom, boot_index, delete_on_termination]} to provision, or
+		// {volume_id} to claim a prepared volume.
+		Volumes []VolumeSpec `yaml:"volumes"`
+		// Volume-kind spec: size ("50GB") and/or base image/iso, optional
+		// boot index and delete-on-termination.
+		Size                string `yaml:"size"`
+		Cdrom               bool   `yaml:"cdrom"`
+		BootIndex           *int   `yaml:"boot_index"`
+		DeleteOnTermination bool   `yaml:"delete_on_termination"`
 	} `yaml:"spec"`
 }
 
@@ -72,14 +89,14 @@ func loadManifests(path string) ([]manifest, error) {
 		if m.Kind == "" {
 			continue // trailing --- leaves an empty document
 		}
-		if m.Kind != "VirtualMachine" && m.Kind != "Flavor" {
-			return nil, fmt.Errorf("%s: unknown kind %q (only Flavor, VirtualMachine)", path, m.Kind)
+		if m.Kind != "VirtualMachine" && m.Kind != "Flavor" && m.Kind != "Volume" {
+			return nil, fmt.Errorf("%s: unknown kind %q (only Flavor, Volume, VirtualMachine)", path, m.Kind)
 		}
 		if m.Metadata.Name == "" {
 			return nil, fmt.Errorf("%s: metadata.name is required", path)
 		}
-		if m.Kind == "VirtualMachine" && m.Spec.Image == "" {
-			return nil, fmt.Errorf("%s: spec.image is required", path)
+		if m.Kind == "VirtualMachine" && m.Spec.Image == "" && len(m.Spec.Volumes) == 0 {
+			return nil, fmt.Errorf("%s: spec.image or spec.volumes is required", path)
 		}
 		out = append(out, m)
 	}
@@ -95,6 +112,34 @@ func manifestNamespace(m manifest) string {
 		return "default"
 	}
 	return m.Metadata.Namespace
+}
+
+// findVolume resolves a volume id or name within a namespace, mirroring
+// findVM. Ids match in any namespace; names are unique per namespace.
+func (c *Client) findVolume(namespace, nameOrID string) (Volume, error) {
+	volumes, err := c.GetVolumes()
+	if err != nil {
+		return Volume{}, err
+	}
+	for _, v := range volumes {
+		if v.ID == nameOrID {
+			return v, nil
+		}
+	}
+	ns := namespace
+	if ns == "" {
+		ns = "default"
+	}
+	for _, v := range volumes {
+		vns := v.Namespace
+		if vns == "" {
+			vns = "default"
+		}
+		if vns == ns && v.Name == nameOrID {
+			return v, nil
+		}
+	}
+	return Volume{}, fmt.Errorf("volume %q not found in namespace %q", nameOrID, ns)
 }
 
 // findVM resolves a VM id or name to its record. Ids match in any namespace;

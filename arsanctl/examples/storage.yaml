@@ -1,27 +1,26 @@
-# Storage: extra data disks plus an optional rescue cdrom. The root disk is
-# always a thin overlay of spec.image (<namespace>-<name>-0.qcow2); extras
-# are numbered from 1. Files live next to the base image and are deleted
-# with the VM; bases and isos are shared and never removed.
+# Storage is per-VM volumes, Nova-style. Inline entries provision at create;
+# {volume_id} entries claim a prepared volume instead. The boot volume
+# carries boot_index 0; delete_on_termination removes the file with the
+# record, while shared volumes and isos are never deleted.
 apiVersion: v1alpha1
 kind: VirtualMachine
 metadata:
   name: db1
   namespace: demo
 spec:
-  image: https://example.com/base.qcow2
   flavorRef: m1.medium
-  disks:
+  volumes:
+    - {name: root, size: 20GB, image: https://example.com/base.qcow2, boot_index: 0, delete_on_termination: true}
     - {name: data, size: 50GB}
     - {name: logs, size: 10GB}
 ---
-# Rescue: attach the iso, boot from it, start. Detach when done.
+# Rescue: a cdrom is just a volume with an iso and no size. Attach it,
+# move boot to it, start — detach and delete it when done.
 apiVersion: v1alpha1
-kind: VirtualMachine
+kind: Volume
 metadata:
-  name: rescue1
+  name: rescue-iso
   namespace: demo
 spec:
-  image: https://example.com/base.qcow2
-  flavorRef: m1.small
-  cdrom: https://example.com/rescue.iso
-  boot: cdrom
+  image: https://example.com/rescue.iso
+  cdrom: true

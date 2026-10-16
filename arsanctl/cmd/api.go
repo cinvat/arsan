@@ -84,28 +84,52 @@ type Node struct {
 	NotReadyReason string    `json:"NotReadyReason"`
 }
 
-// Disk mirrors the api's stored disk: name, size in MiB, optional backing.
-type Disk struct {
-	Name    string `json:"Name"`
-	Index   int    `json:"Index"`
-	SizeMiB int    `json:"SizeMiB"`
-	Image   string `json:"Image"`
+// VolumeAttachment mirrors one attached volume: which volume, as which
+// device, in which boot position.
+type VolumeAttachment struct {
+	VolumeID  string `json:"VolumeID"`
+	Device    string `json:"Device"`
+	BootIndex *int   `json:"BootIndex"`
+}
+
+// Volume mirrors the api's stored volume.
+type Volume struct {
+	ID                  string `json:"ID"`
+	Name                string `json:"Name"`
+	Namespace           string `json:"Namespace"`
+	SizeMiB             int    `json:"SizeMiB"`
+	Image               string `json:"Image"`
+	Cdrom               bool   `json:"Cdrom"`
+	BootIndex           *int   `json:"BootIndex"`
+	DeleteOnTermination bool   `json:"DeleteOnTermination"`
+	State               string `json:"State"`
+	AttachedTo          string `json:"AttachedTo"`
+}
+
+// VolumeSpec mirrors the api's create-time volume entry: an existing volume
+// by id, or an inline definition to provision.
+type VolumeSpec struct {
+	VolumeID            string `json:"volume_id" yaml:"volume_id"`
+	Name                string `json:"name" yaml:"name"`
+	Size                string `json:"size" yaml:"size"`
+	Image               string `json:"image,omitempty" yaml:"image,omitempty"`
+	Cdrom               bool   `json:"cdrom,omitempty" yaml:"cdrom,omitempty"`
+	BootIndex           *int   `json:"boot_index,omitempty" yaml:"boot_index,omitempty"`
+	DeleteOnTermination bool   `json:"delete_on_termination,omitempty" yaml:"delete_on_termination,omitempty"`
 }
 
 type VirtualMachine struct {
-	ID            string `json:"ID"`
-	Name          string `json:"Name"`
-	Namespace     string `json:"Namespace"`
-	State         string `json:"State"`
-	NodeID        string `json:"NodeID"`
-	ImageRef      string `json:"ImageRef"`
-	Flavor        Flavor `json:"Flavor"`
-	Disks         []Disk `json:"Disks"`
-	CdromImage    string `json:"CdromImage"`
-	BootDevice    string `json:"BootDevice"`
-	PinnedCPUs    []int  `json:"PinnedCPUs"`
-	PendingReason string `json:"PendingReason"`
-	FailureReason string `json:"FailureReason"`
+	ID            string             `json:"ID"`
+	Name          string             `json:"Name"`
+	Namespace     string             `json:"Namespace"`
+	State         string             `json:"State"`
+	NodeID        string             `json:"NodeID"`
+	ImageRef      string             `json:"ImageRef"`
+	Flavor        Flavor             `json:"Flavor"`
+	Volumes       []VolumeAttachment `json:"Volumes"`
+	PinnedCPUs    []int              `json:"PinnedCPUs"`
+	PendingReason string             `json:"PendingReason"`
+	FailureReason string             `json:"FailureReason"`
 }
 
 type Client struct {
@@ -203,17 +227,9 @@ func (c *Client) GetVirtualMachines() ([]VirtualMachine, error) {
 	return out, nil
 }
 
-// DiskRequest mirrors the api's disk shape; size stays a string ("50GB")
-// so the server parses and validates units in one place.
-type DiskRequest struct {
-	Name  string `json:"name" yaml:"name"`
-	Size  string `json:"size" yaml:"size"`
-	Image string `json:"image,omitempty" yaml:"image,omitempty"`
-}
-
-func (c *Client) CreateVirtualMachine(namespace, name, image, flavorRef string, flavor Flavor, disks []DiskRequest, cdrom, boot string) (VirtualMachine, error) {
+func (c *Client) CreateVirtualMachine(namespace, name, image, flavorRef string, flavor Flavor, volumes []VolumeSpec) (VirtualMachine, error) {
 	var out VirtualMachine
-	body := map[string]any{"namespace": namespace, "name": name, "image_ref": image, "disks": disks, "cdrom_image": cdrom, "boot_device": boot}
+	body := map[string]any{"namespace": namespace, "name": name, "image_ref": image, "volumes": volumes}
 	if flavorRef != "" {
 		body["flavor_ref"] = flavorRef
 	} else {
@@ -243,24 +259,45 @@ func (c *Client) DeleteVirtualMachine(id string) error {
 	return c.delete("/virtualmachines/" + id)
 }
 
-func (c *Client) AttachDisk(id string, d DiskRequest) error {
-	return c.post("/virtualmachines/"+id+"/disks", d, nil)
+func (c *Client) CreateVolume(name, namespace, size, image string, cdrom bool, bootIndex *int, deleteOnTermination bool) (Volume, error) {
+	var out Volume
+	err := c.post("/volumes", map[string]any{
+		"name": name, "namespace": namespace, "size": size, "image": image,
+		"cdrom": cdrom, "boot_index": bootIndex, "delete_on_termination": deleteOnTermination,
+	}, &out)
+	return out, err
 }
 
-func (c *Client) DetachDisk(id, name string) error {
-	return c.delete("/virtualmachines/" + id + "/disks/" + name)
+func (c *Client) GetVolumes() ([]Volume, error) {
+	var out []Volume
+	if err := c.get("/volumes", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func (c *Client) AttachCdrom(id, image string) error {
-	return c.post("/virtualmachines/"+id+"/cdrom", map[string]any{"image": image}, nil)
+func (c *Client) GetVolume(id string) (Volume, error) {
+	var out Volume
+	if err := c.get("/volumes/"+id, &out); err != nil {
+		return out, err
+	}
+	return out, nil
 }
 
-func (c *Client) DetachCdrom(id string) error {
-	return c.delete("/virtualmachines/" + id + "/cdrom")
+func (c *Client) DeleteVolume(id string) error {
+	return c.delete("/volumes/" + id)
 }
 
-func (c *Client) SetBootDevice(id, device string) error {
-	return c.post("/virtualmachines/"+id+"/boot", map[string]any{"device": device}, nil)
+func (c *Client) AttachVolume(id, volumeID string, bootIndex *int) error {
+	return c.post("/virtualmachines/"+id+"/volumes", map[string]any{"volume_id": volumeID, "boot_index": bootIndex}, nil)
+}
+
+func (c *Client) DetachVolume(id, volumeID string) error {
+	return c.delete("/virtualmachines/" + id + "/volumes/" + volumeID)
+}
+
+func (c *Client) SetBootVolume(id, volumeID string) error {
+	return c.post("/virtualmachines/"+id+"/boot", map[string]any{"volume_id": volumeID}, nil)
 }
 
 // snapshot mirrors one NDJSON line of a watch stream.

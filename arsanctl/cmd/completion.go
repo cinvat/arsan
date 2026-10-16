@@ -11,6 +11,7 @@ var (
 	nodeKinds   = []string{"node", "nodes"}
 	vmKinds     = []string{"vm", "vms", "virtualmachine", "virtualmachines"}
 	flavorKinds = []string{"flavor", "flavors", "fl"}
+	volumeKinds = []string{"volume", "volumes", "vol", "vols"}
 )
 
 func noFiles() ([]string, cobra.ShellCompDirective) {
@@ -79,6 +80,22 @@ func completeNames(cmd *cobra.Command, args []string, _ string) ([]string, cobra
 			out = append(out, f.Name)
 		}
 		return out, cobra.ShellCompDirectiveNoFileComp
+	case "volume", "volumes", "vol", "vols":
+		volumes, err := c.GetVolumes()
+		if err != nil {
+			return noFiles()
+		}
+		out := make([]string, 0, len(volumes))
+		for _, v := range volumes {
+			vns := v.Namespace
+			if vns == "" {
+				vns = "default"
+			}
+			if vns == ns {
+				out = append(out, v.Name)
+			}
+		}
+		return out, cobra.ShellCompDirectiveNoFileComp
 	default:
 		return noFiles()
 	}
@@ -88,13 +105,60 @@ func completeNames(cmd *cobra.Command, args []string, _ string) ([]string, cobra
 // describe's and delete's two-arg shape.
 func completeKindThenNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) == 0 {
-		return completeKinds(nodeKinds, vmKinds, flavorKinds)(cmd, args, toComplete)
+		return completeKinds(nodeKinds, vmKinds, flavorKinds, volumeKinds)(cmd, args, toComplete)
 	}
 	return completeNames(cmd, args, toComplete)
 }
 
 func init() {
-	getCmd.ValidArgsFunction = completeKinds(nodeKinds, vmKinds, flavorKinds)
+	getCmd.ValidArgsFunction = completeKinds(nodeKinds, vmKinds, flavorKinds, volumeKinds)
+
+	// attach/detach/boot take a VM first, then a volume name.
+	vmThenVolume := func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		c := NewClient(apiURL(cmd))
+		ns, _ := cmd.Flags().GetString("namespace")
+		if ns == "" {
+			ns = "default"
+		}
+		if len(args) == 0 {
+			vms, err := c.GetVirtualMachines()
+			if err != nil {
+				return noFiles()
+			}
+			var out []string
+			for _, vm := range vms {
+				vmns := vm.Namespace
+				if vmns == "" {
+					vmns = "default"
+				}
+				if vmns == ns {
+					out = append(out, vm.Name)
+				}
+			}
+			return out, cobra.ShellCompDirectiveNoFileComp
+		}
+		if len(args) == 1 {
+			volumes, err := c.GetVolumes()
+			if err != nil {
+				return noFiles()
+			}
+			var out []string
+			for _, v := range volumes {
+				vns := v.Namespace
+				if vns == "" {
+					vns = "default"
+				}
+				if vns == ns {
+					out = append(out, v.Name)
+				}
+			}
+			return out, cobra.ShellCompDirectiveNoFileComp
+		}
+		return noFiles()
+	}
+	attachCmd.ValidArgsFunction = vmThenVolume
+	detachCmd.ValidArgsFunction = vmThenVolume
+	bootCmd.ValidArgsFunction = vmThenVolume
 	watchCmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) != 0 {
 			return noFiles()

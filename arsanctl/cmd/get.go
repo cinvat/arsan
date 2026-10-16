@@ -9,8 +9,8 @@ import (
 var getCmd = &cobra.Command{
 	// get stays short: one line per object, no long fields. IMAGE urls,
 	// NOTREADY reasons and pin lists live in describe.
-	Use:   "get (nodes|virtualmachines|flavors)",
-	Short: "List nodes, virtual machines or flavors",
+	Use:   "get (nodes|virtualmachines|flavors|volumes)",
+	Short: "List nodes, virtual machines, flavors or volumes",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		watch, _ := cmd.Flags().GetBool("watch")
@@ -45,8 +45,17 @@ var getCmd = &cobra.Command{
 			}
 			printFlavors(flavors)
 			return nil
+		case "volumes", "volume", "vol", "vols":
+			ns, _ := cmd.Flags().GetString("namespace")
+			all, _ := cmd.Flags().GetBool("all-namespaces")
+			volumes, err := c.GetVolumes()
+			if err != nil {
+				return err
+			}
+			printVolumes(filterVolumes(volumes, ns, all))
+			return nil
 		default:
-			return fmt.Errorf("unknown resource %q: nodes, virtualmachines or flavors", args[0])
+			return fmt.Errorf("unknown resource %q: nodes, virtualmachines, flavors or volumes", args[0])
 		}
 	},
 }
@@ -84,6 +93,39 @@ func filterVMs(vms []VirtualMachine, ns string, all bool) []VirtualMachine {
 		}
 		if vmns == ns {
 			out = append(out, vm)
+		}
+	}
+	return out
+}
+
+func printVolumes(volumes []Volume) {
+	fmt.Printf("%-16s %-16s %-10s %-8s %-10s %s\n", "NAMESPACE", "NAME", "SIZE", "STATE", "ATTACHED", "IMAGE")
+	for _, v := range volumes {
+		attached := dash(v.AttachedTo)
+		if v.AttachedTo != "" {
+			attached = v.AttachedTo
+		}
+		fmt.Printf("%-16s %-16s %-10s %-8s %-10s %s\n",
+			v.Namespace, v.Name, mibShort(v.SizeMiB), v.State, attached, dash(v.Image))
+	}
+}
+
+// filterVolumes scopes the list to one namespace, like filterVMs.
+func filterVolumes(volumes []Volume, ns string, all bool) []Volume {
+	if all {
+		return volumes
+	}
+	if ns == "" {
+		ns = "default"
+	}
+	out := volumes[:0:0]
+	for _, v := range volumes {
+		vns := v.Namespace
+		if vns == "" {
+			vns = "default"
+		}
+		if vns == ns {
+			out = append(out, v)
 		}
 	}
 	return out
