@@ -192,7 +192,7 @@ func TestProbeConvergesOutOfBandBoot(t *testing.T) {
 	}
 	inst, err := c.Store.Create(ctx, core.Instance{
 		ID: "i-1", Name: "i-1", State: core.StatePending,
-		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
+		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +230,7 @@ func TestProbeLeavesInflightRecordsAlone(t *testing.T) {
 	}
 	inst, err := c.Store.Create(ctx, core.Instance{
 		ID: "i-1", Name: "i-1", State: core.StatePending,
-		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
+		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2},
 	})
 	if err != nil {
 		t.Fatal(err)
