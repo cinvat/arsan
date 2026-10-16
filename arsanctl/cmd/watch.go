@@ -52,17 +52,11 @@ func stream(c *Client, path string, handle func(snap snapshot)) error {
 	return sc.Err()
 }
 
-// watchNodes streams the server's node snapshots: one JSON object per line,
-// each a full snapshot, until the server closes or the client is interrupted.
+// watchNodes streams the server's node snapshots, printing each exactly like
+// get nodes. Reasons stay in describe: watch is the short view that updates.
 func watchNodes(c *Client) error {
 	return stream(c, "/nodes?watch=true", func(snap snapshot) {
-		for _, n := range snap.Nodes {
-			reason := ""
-			if n.NotReadyReason != "" {
-				reason = " (" + n.NotReadyReason + ")"
-			}
-			fmt.Printf("%-32s %-10s%s\n", n.ID, n.State, reason)
-		}
+		printNodes(snap.Nodes)
 		fmt.Println("---")
 	})
 }
