@@ -17,10 +17,11 @@ type Handler struct {
 	instances core.InstanceService
 	nodes     core.NodeService
 	flavors   core.FlavorService
+	volumes   core.VolumeService
 }
 
-func New(instances core.InstanceService, nodes core.NodeService, flavors core.FlavorService) *Handler {
-	return &Handler{instances: instances, nodes: nodes, flavors: flavors}
+func New(instances core.InstanceService, nodes core.NodeService, flavors core.FlavorService, volumes core.VolumeService) *Handler {
+	return &Handler{instances: instances, nodes: nodes, flavors: flavors, volumes: volumes}
 }
 
 func Health(c *gin.Context) {
@@ -117,66 +118,87 @@ func (h *Handler) StopVirtualMachine(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "stopped"})
 }
 
-// AttachDisk enqueues an extra data disk. Size is a Quantity string ("50GB");
-// the controller provisions and hotplugs it, or redefines a stopped guest.
-func (h *Handler) AttachDisk(c *gin.Context) {
-	var req core.CreateDiskRequest
+// AttachVolume enqueues attaching a prepared volume, optionally taking the
+// boot position. Live when the guest runs, redefine when it does not.
+func (h *Handler) AttachVolume(c *gin.Context) {
+	var req struct {
+		VolumeID  string `json:"volume_id"`
+		BootIndex *int   `json:"boot_index"`
+	}
 	if !bind(c, &req) {
 		return
 	}
-	if err := h.instances.AttachDisk(c.Request.Context(), c.Param("id"), req); err != nil {
+	if err := h.instances.AttachVolume(c.Request.Context(), c.Param("id"), req.VolumeID, req.BootIndex); err != nil {
 		writeErr(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "attaching"})
 }
 
-func (h *Handler) DetachDisk(c *gin.Context) {
-	if err := h.instances.DetachDisk(c.Request.Context(), c.Param("id"), c.Param("name")); err != nil {
+func (h *Handler) DetachVolume(c *gin.Context) {
+	if err := h.instances.DetachVolume(c.Request.Context(), c.Param("id"), c.Param("volumeId")); err != nil {
 		writeErr(c, err)
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"status": "detaching"})
 }
 
-// AttachCdrom enqueues a read-only iso. Boot order itself only changes at
-// define time: attach, set boot to cdrom, start.
-func (h *Handler) AttachCdrom(c *gin.Context) {
+// SetBootVolume moves the single boot position to another attached volume.
+// The VM must be stopped: boot order lives in the defined XML.
+func (h *Handler) SetBootVolume(c *gin.Context) {
 	var req struct {
-		Image string `json:"image"`
+		VolumeID string `json:"volume_id"`
 	}
 	if !bind(c, &req) {
 		return
 	}
-	if err := h.instances.AttachCdrom(c.Request.Context(), c.Param("id"), req.Image); err != nil {
+	if err := h.instances.SetBootVolume(c.Request.Context(), c.Param("id"), req.VolumeID); err != nil {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"status": "attaching"})
+	c.JSON(http.StatusAccepted, gin.H{"status": "setting boot volume"})
 }
 
-func (h *Handler) DetachCdrom(c *gin.Context) {
-	if err := h.instances.DetachCdrom(c.Request.Context(), c.Param("id")); err != nil {
-		writeErr(c, err)
-		return
-	}
-	c.JSON(http.StatusAccepted, gin.H{"status": "detaching"})
-}
-
-// SetBootDevice selects what boots next, disk or cdrom. The VM must be
-// stopped: boot order lives in the defined XML.
-func (h *Handler) SetBootDevice(c *gin.Context) {
-	var req struct {
-		Device string `json:"device"`
-	}
+func (h *Handler) CreateVolume(c *gin.Context) {
+	var req core.CreateVolumeRequest
 	if !bind(c, &req) {
 		return
 	}
-	if err := h.instances.SetBootDevice(c.Request.Context(), c.Param("id"), req.Device); err != nil {
+	v, err := h.volumes.Create(c.Request.Context(), req)
+	if err != nil {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"status": "setting boot device"})
+	c.JSON(http.StatusCreated, v)
+}
+
+func (h *Handler) ListVolumes(c *gin.Context) {
+	vs, err := h.volumes.List(c.Request.Context())
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	if vs == nil {
+		vs = []core.Volume{}
+	}
+	c.JSON(http.StatusOK, vs)
+}
+
+func (h *Handler) GetVolume(c *gin.Context) {
+	v, err := h.volumes.Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, v)
+}
+
+func (h *Handler) DeleteVolume(c *gin.Context) {
+	if err := h.volumes.Delete(c.Request.Context(), c.Param("id")); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (h *Handler) CreateFlavor(c *gin.Context) {
@@ -251,7 +273,7 @@ func writeErr(c *gin.Context, err error) {
 		write(c, http.StatusConflict, "no_valid_host", err)
 	case errors.Is(err, core.ErrCapacityConflict):
 		write(c, http.StatusConflict, "capacity_conflict", err)
-	case errors.Is(err, core.ErrInstanceNotFound), errors.Is(err, core.ErrNodeNotFound), errors.Is(err, core.ErrFlavorNotFound):
+	case errors.Is(err, core.ErrInstanceNotFound), errors.Is(err, core.ErrNodeNotFound), errors.Is(err, core.ErrFlavorNotFound), errors.Is(err, core.ErrVolumeNotFound):
 		write(c, http.StatusNotFound, "not_found", err)
 	case errors.Is(err, core.ErrUnsupportedPlatform):
 		write(c, http.StatusFailedDependency, "unsupported_platform", err)

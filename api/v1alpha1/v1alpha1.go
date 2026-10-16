@@ -23,6 +23,7 @@ type Config struct {
 	Instances core.InstanceService
 	Nodes     core.NodeService
 	Flavors   core.FlavorService
+	Volumes   core.VolumeService
 	Bus       bus.Bus
 	// BootstrapToken is the shared secret an agent presents to register.
 	// Empty disables agent registration entirely.
@@ -31,7 +32,7 @@ type Config struct {
 
 // Register mounts this version onto the engine under its own group.
 func Register(r *gin.Engine, cfg Config) {
-	h := handler.New(cfg.Instances, cfg.Nodes, cfg.Flavors)
+	h := handler.New(cfg.Instances, cfg.Nodes, cfg.Flavors, cfg.Volumes)
 
 	bootstrap := &handler.Bootstrap{
 		Token: cfg.BootstrapToken,
@@ -58,11 +59,17 @@ func Register(r *gin.Engine, cfg Config) {
 	g.DELETE("/virtualmachines/:id", h.DeleteVirtualMachine)
 	g.POST("/virtualmachines/:id/start", h.StartVirtualMachine)
 	g.POST("/virtualmachines/:id/stop", h.StopVirtualMachine)
-	g.POST("/virtualmachines/:id/disks", h.AttachDisk)
-	g.DELETE("/virtualmachines/:id/disks/:name", h.DetachDisk)
-	g.POST("/virtualmachines/:id/cdrom", h.AttachCdrom)
-	g.DELETE("/virtualmachines/:id/cdrom", h.DetachCdrom)
-	g.POST("/virtualmachines/:id/boot", h.SetBootDevice)
+	g.POST("/virtualmachines/:id/volumes", h.AttachVolume)
+	g.DELETE("/virtualmachines/:id/volumes/:volumeId", h.DetachVolume)
+	g.POST("/virtualmachines/:id/boot", h.SetBootVolume)
+
+	// Volumes. Named, independent block devices: create from a base, blank,
+	// or an iso; attach by id; delete removes the record (and the file only
+	// when DeleteOnTermination said so).
+	g.POST("/volumes", h.CreateVolume)
+	g.GET("/volumes", h.ListVolumes)
+	g.GET("/volumes/:id", h.GetVolume)
+	g.DELETE("/volumes/:id", h.DeleteVolume)
 
 	// Flavors. Named, immutable sizing referenced by flavor_ref at VM create.
 	g.POST("/flavors", h.CreateFlavor)

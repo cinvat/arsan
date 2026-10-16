@@ -33,6 +33,7 @@ type Config struct {
 	Instances core.InstanceService
 	Nodes     core.NodeService
 	Flavors   core.FlavorService
+	Volumes   core.VolumeService
 	Bus       bus.Bus
 	// BootstrapToken is the shared secret an agent presents to register.
 	BootstrapToken string
@@ -48,6 +49,7 @@ func Register(cfg Config) *gin.Engine {
 		Instances:      cfg.Instances,
 		Nodes:          cfg.Nodes,
 		Flavors:        cfg.Flavors,
+		Volumes:        cfg.Volumes,
 		Bus:            cfg.Bus,
 		BootstrapToken: cfg.BootstrapToken,
 	})
