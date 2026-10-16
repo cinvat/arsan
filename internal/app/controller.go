@@ -164,7 +164,66 @@ func (c *Controller) ProbeAgent(ctx context.Context, nodeID string) error {
 			c.log.Warn("fetch spec", "node", nodeID, "err", err)
 		}
 	}
+	if err := c.syncGuestStates(ctx, nodeID, d); err != nil && ctx.Err() == nil {
+		c.log.Warn("sync guest states", "node", nodeID, "err", err)
+	}
 	return c.setReadiness(ctx, nodeID, nil)
+}
+
+// syncGuestStates converges records toward what the hypervisor reports. Only
+// steady states move, and only between steady states: a virsh destroy behind
+// arsan's back flips RUNNING to SHUTOFF on the next probe, but nothing here
+// touches PENDING, SCHEDULING, BUILDING or ERROR — those belong to whoever
+// put the record there. Hand-made domains (no record, or a record on another
+// node) are ignored: arsan tracks only what it defined.
+//
+// Absence is also an answer: the probe just round-tripped this engine, so a
+// recorded instance the listing does not contain is genuinely gone, not
+// merely unreported. A failed listing converges nothing at all — erroring
+// out here beats mass-shutoff on a partial answer.
+//
+// A lost compare-and-swap means a concurrent operation moved the record first,
+// which is the newer truth; it is skipped, not forced.
+func (c *Controller) syncGuestStates(ctx context.Context, nodeID string, d core.Driver) error {
+	syncCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+
+	observed, err := d.Domains(syncCtx)
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]core.InstanceState, len(observed))
+	for _, dom := range observed {
+		if dom.State.Steady() {
+			seen[dom.InstanceID] = dom.State
+		}
+	}
+	node, err := c.Store.GetNode(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	for _, id := range node.Instances {
+		inst, err := c.Store.Get(ctx, id)
+		if err != nil {
+			continue // row gone (delete raced the probe); nothing to converge
+		}
+		if inst.NodeID != nodeID || !inst.State.Steady() {
+			continue
+		}
+		want, ok := seen[id]
+		if !ok {
+			want = core.StateShutoff // defined nowhere: shut off
+		}
+		if inst.State == want {
+			continue
+		}
+		if _, err := c.Store.Transition(ctx, inst.ID, inst.State, want); err != nil {
+			continue // someone else moved it first; theirs is newer
+		}
+		c.log.Info("guest state drift", "instance", inst.ID,
+			"from", inst.State, "to", want)
+	}
+	return nil
 }
 
 // setReadiness records the probe outcome. An operator-disabled node is left

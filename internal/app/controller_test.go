@@ -147,6 +147,112 @@ func TestProbeMissingNode(t *testing.T) {
 	}
 }
 
+// A virsh destroy behind arsan's back must surface: the next passing probe
+// flips the record to what the hypervisor reports.
+func TestProbeConvergesOutOfBandDestroy(t *testing.T) {
+	c := newTestController(t, true)
+	registerTestNode(t, c, "n-1", true)
+	ctx := t.Context()
+
+	if _, err := c.Store.Create(ctx, core.Instance{
+		ID: "i-1", Name: "i-1", NodeID: "n-1", State: core.StateRunning,
+		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Store.AttachInstance(ctx, "n-1", "i-1"); err != nil {
+		t.Fatal(err)
+	}
+	// The fake engine never saw i-1: as far as the hypervisor is concerned
+	// there is no such domain, exactly like an undefined virsh guest.
+	if err := c.ProbeAgent(ctx, "n-1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Store.Get(ctx, "i-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != core.StateShutoff {
+		t.Fatalf("state = %s, want SHUTOFF: the guest is gone", got.State)
+	}
+}
+
+// The reverse drift converges too: a SHUTOFF record with a running domain
+// comes back to RUNNING, through the same steady-state path.
+func TestProbeConvergesOutOfBandBoot(t *testing.T) {
+	c := newTestController(t, true)
+	registerTestNode(t, c, "n-1", true)
+	ctx := t.Context()
+
+	// READY without probing: a passing probe records the fake engine's empty
+	// spec and zeroes capacity, which is correct behavior but starves the
+	// build below. Readiness is the scheduler's gate, not the probe's here.
+	if _, err := c.Store.SetReadiness(ctx, "n-1", core.NodeReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := c.Store.Create(ctx, core.Instance{
+		ID: "i-1", Name: "i-1", State: core.StatePending,
+		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A real build puts the domain on the (fake) hypervisor and the record
+	// to RUNNING; then drift the record out from under it.
+	if err := c.Compute.Build(ctx, inst); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := c.Store.Transition(ctx, "i-1", core.StateRunning, core.StateShutoff); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ProbeAgent(ctx, "n-1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Store.Get(ctx, "i-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != core.StateRunning {
+		t.Fatalf("state = %s, want RUNNING: the guest is up", got.State)
+	}
+}
+
+// In-flight records are not reconcile's business: a BUILDING row stays
+// BUILDING even when the hypervisor already runs the domain, because the
+// build owns that transition.
+func TestProbeLeavesInflightRecordsAlone(t *testing.T) {
+	c := newTestController(t, true)
+	registerTestNode(t, c, "n-1", true)
+	ctx := t.Context()
+
+	if _, err := c.Store.SetReadiness(ctx, "n-1", core.NodeReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := c.Store.Create(ctx, core.Instance{
+		ID: "i-1", Name: "i-1", State: core.StatePending,
+		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Compute.Build(ctx, inst); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := c.Store.Transition(ctx, "i-1", core.StateRunning, core.StateBuilding); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ProbeAgent(ctx, "n-1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Store.Get(ctx, "i-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != core.StateBuilding {
+		t.Fatalf("state = %s, want BUILDING left alone mid-flight", got.State)
+	}
+}
+
 // A sweep must not be stopped by one unreachable agent.
 func TestProbeAllContinuesPastFailures(t *testing.T) {
 	c := newTestController(t, false)
