@@ -41,6 +41,7 @@ type Stores interface {
 	core.InstanceStore
 	core.NodeStore
 	core.FlavorStore
+	core.VolumeStore
 }
 
 // Controller is the business-logic half: placement, the instance state machine,
@@ -60,6 +61,7 @@ func NewController(cfg Config, store Stores, commands bus.Bus, log Logger) (*Con
 	sched := scheduler.New(scheduler.Config{
 		Instances:   store,
 		Nodes:       store,
+		Volumes:     store,
 		DriverFor:   drivers(commands),
 		MaxAttempts: cfg.SchedulerMaxAttempts,
 		Log:         log,
@@ -71,6 +73,7 @@ func NewController(cfg Config, store Stores, commands bus.Bus, log Logger) (*Con
 		Compute: compute.New(compute.Config{
 			Instances:              store,
 			Nodes:                  store,
+			Volumes:                store,
 			Scheduler:              sched,
 			DriverFor:              drivers(commands),
 			DriverOperationTimeout: cfg.ComputeDriverOpTimeout,

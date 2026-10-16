@@ -48,7 +48,8 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 		}
 		nodes := &records.Nodes{Store: store}
 		flavors := &records.Flavors{Store: store}
-		instances := &records.Instances{Store: store, Flavors: store, Bus: commands}
+		volumes := &records.Volumes{Store: store}
+		instances := &records.Instances{Store: store, Flavors: store, Volumes: store, Bus: commands}
 
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 		defer stop()
@@ -62,6 +63,7 @@ Routes are mounted under their API version group, so v1alpha1 lives at
 				Instances:      instances,
 				Nodes:          nodes,
 				Flavors:        flavors,
+				Volumes:        volumes,
 				Bus:            commands,
 				BootstrapToken: bootstrapToken(),
 			}),

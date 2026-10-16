@@ -20,6 +20,7 @@ type DriverFor func(nodeID string) (core.Driver, error)
 type Config struct {
 	Instances              core.InstanceStore
 	Nodes                  core.NodeStore
+	Volumes                core.VolumeStore
 	Scheduler              core.Scheduler
 	DriverFor              DriverFor
 	DriverOperationTimeout time.Duration
@@ -75,6 +76,25 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 			return d.Delete(dctx, id)
 		}); err != nil && !errors.Is(err, core.ErrInstanceNotFound) {
 			return err
+		}
+	}
+	// Free the volumes: detach everything, then delete the records that
+	// asked to die with the VM. Shared volumes survive as available rows;
+	// cdroms always survive (their delete flag is forced off).
+	for _, att := range inst.Volumes {
+		v, err := s.cfg.Volumes.GetVolume(ctx, att.VolumeID)
+		if err != nil {
+			continue // row already gone: nothing to free
+		}
+		if v.State == core.VolumeInUse && v.AttachedTo == id {
+			if _, err := s.cfg.Volumes.DetachVolume(ctx, v.ID); err != nil {
+				s.cfg.Log.Error("volume leak", "instance", id, "volume", v.ID, "err", err)
+			}
+		}
+		if v.DeleteOnTermination {
+			if err := s.cfg.Volumes.DeleteVolume(ctx, v.ID); err != nil {
+				s.cfg.Log.Error("volume leak", "instance", id, "volume", v.ID, "err", err)
+			}
 		}
 	}
 	// The row goes away but the claim must come back first, or every deleted
@@ -135,59 +155,120 @@ func (s *Service) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-// createRequestOf renders the engine request from a record: full flavor,
-// full disk set, pins. Attach and detach mutate the record first, so by the
-// time the engine is called the request already describes the desired state.
-func createRequestOf(inst core.Instance) core.CreateRequest {
-	return core.CreateRequest{
-		InstanceID: inst.ID, NodeID: inst.NodeID, Name: inst.Name, Namespace: inst.Namespace,
-		Flavor: inst.Flavor, Disks: inst.Disks, CdromImage: inst.CdromImage, BootDevice: inst.BootDevice,
-		PinnedCPUs: inst.PinnedCPUs, ImageRef: inst.ImageRef,
+// volumeRows resolves an instance's attachments to their volume rows. A
+// missing row is a hard error: the attachment names storage that no longer
+// exists, and guessing would boot the wrong disk.
+func (s *Service) volumeRows(ctx context.Context, inst core.Instance) ([]core.Volume, error) {
+	out := make([]core.Volume, 0, len(inst.Volumes))
+	for _, att := range inst.Volumes {
+		v, err := s.cfg.Volumes.GetVolume(ctx, att.VolumeID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
 	}
+	return out, nil
 }
 
-// liveStates are the states a disk may be attached to or detached from. Boot
-// switches are define-time and need SHUTOFF, enforced by SetBootDevice.
+// createRequestOf renders the engine request from a record plus its volume
+// rows. It re-reads volumes every call so attach/detach between scheduling
+// and define converge to the latest truth.
+func (s *Service) createRequestOf(ctx context.Context, inst core.Instance) (core.CreateRequest, error) {
+	attached := make([]core.AttachedVolume, 0, len(inst.Volumes))
+	for _, att := range inst.Volumes {
+		v, err := s.cfg.Volumes.GetVolume(ctx, att.VolumeID)
+		if err != nil {
+			return core.CreateRequest{}, err
+		}
+		attached = append(attached, core.AttachedVolume{Volume: v, Device: att.Device})
+	}
+	return core.CreateRequest{
+		InstanceID: inst.ID, NodeID: inst.NodeID, Name: inst.Name, Namespace: inst.Namespace,
+		Flavor: inst.Flavor, Volumes: attached,
+		PinnedCPUs: inst.PinnedCPUs, ImageRef: inst.ImageRef,
+	}, nil
+}
+
+// liveStates are the states a volume may be attached to or detached from.
+// Boot order itself is define-time and needs SHUTOFF.
 func liveStates(state core.InstanceState) bool {
 	return state == core.StateRunning || state == core.StateShutoff
 }
 
-// AttachDisk validates, records, then converges: live hotplug when the guest
-// runs, redefine when it does not. A failed converge reverts the record, so
-// the next attempt starts from the truth rather than a half-applied wish.
-func (s *Service) AttachDisk(ctx context.Context, id string, disk core.CreateDiskRequest) error {
+// freeDevice assigns the lowest free virtio letter: vda, vdb, … Detaches
+// never rename survivors, so letters stay stable across the VM's life.
+func freeDevice(used []core.VolumeAttachment) string {
+	taken := map[byte]bool{}
+	for _, att := range used {
+		if len(att.Device) == 3 && att.Device[:2] == "vd" {
+			taken[att.Device[2]] = true
+		}
+	}
+	for c := byte('a'); c <= byte('z'); c++ {
+		if !taken[c] {
+			return "vd" + string(c)
+		}
+	}
+	return ""
+}
+
+// AttachVolume validates, records, then converges: live hotplug when the
+// guest runs, redefine when it does not. A failed converge reverts the
+// record and frees the volume, so the next attempt starts from the truth
+// rather than a half-applied wish.
+func (s *Service) AttachVolume(ctx context.Context, id, volumeID string, bootIndex *int) error {
 	inst, err := s.cfg.Instances.Get(ctx, id)
 	if err != nil {
 		return err
 	}
 	if !liveStates(inst.State) {
-		return fmt.Errorf("attach disk in state %s: %w", inst.State, core.ErrInvalidTransition)
+		return fmt.Errorf("attach volume in state %s: %w", inst.State, core.ErrInvalidTransition)
 	}
-	if err := core.ValidateName(disk.Name); err != nil {
+	vol, err := s.cfg.Volumes.GetVolume(ctx, volumeID)
+	if err != nil {
 		return err
 	}
-	for _, d := range inst.Disks {
-		if d.Name == disk.Name {
-			return fmt.Errorf("attach disk %q: already attached: %w", disk.Name, core.ErrInvalidRequest)
+	if vol.Namespace != inst.Namespace {
+		return fmt.Errorf("attach volume %s: cross-namespace: %w", volumeID, core.ErrInvalidRequest)
+	}
+	for _, att := range inst.Volumes {
+		if att.VolumeID == volumeID {
+			return fmt.Errorf("attach volume %s: already attached: %w", volumeID, core.ErrInvalidRequest)
 		}
 	}
-	if disk.Size.MiB() <= 0 {
-		return fmt.Errorf("attach disk %q: size is required: %w", disk.Name, core.ErrInvalidRequest)
+	if bootIndex != nil {
+		for _, att := range inst.Volumes {
+			if att.BootIndex != nil {
+				return fmt.Errorf("attach volume %s: boot taken, move it with set-boot first: %w", volumeID, core.ErrInvalidRequest)
+			}
+		}
 	}
-	maxIndex := 0
-	for _, d := range inst.Disks {
-		maxIndex = max(maxIndex, d.Index)
+	device := freeDevice(inst.Volumes)
+	if device == "" {
+		return fmt.Errorf("attach volume %s: no free device letters: %w", volumeID, core.ErrInvalidRequest)
 	}
-	attached := core.Disk{Name: disk.Name, Index: maxIndex + 1, SizeMiB: disk.Size.MiB(), Image: disk.Image}
-	inst.Disks = append(inst.Disks, attached)
+	saved := inst.Volumes
+	inst.Volumes = append(inst.Volumes, core.VolumeAttachment{VolumeID: volumeID, Device: device, BootIndex: bootIndex})
 	updated, err := s.cfg.Instances.Update(ctx, inst)
 	if err != nil {
 		return err
 	}
+	if _, err := s.cfg.Volumes.AttachVolume(ctx, volumeID, id); err != nil {
+		_ = s.revertVolumes(ctx, id, saved)
+		return err
+	}
+	req, err := s.createRequestOf(ctx, updated)
+	if err != nil {
+		_, _ = s.cfg.Volumes.DetachVolume(ctx, volumeID)
+		_ = s.revertVolumes(ctx, id, saved)
+		return err
+	}
+	attached := core.AttachedVolume{Volume: vol, Device: device}
 	if err := s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
-		return d.AttachDisk(dctx, createRequestOf(updated), attached)
+		return d.AttachVolume(dctx, req, attached)
 	}); err != nil {
-		if rerr := s.revertDisks(ctx, id, inst.Disks[:len(inst.Disks)-1]); rerr != nil {
+		_, _ = s.cfg.Volumes.DetachVolume(ctx, volumeID)
+		if rerr := s.revertVolumes(ctx, id, saved); rerr != nil {
 			s.cfg.Log.Error("attach revert", "instance", id, "err", rerr)
 		}
 		return err
@@ -195,126 +276,76 @@ func (s *Service) AttachDisk(ctx context.Context, id string, disk core.CreateDis
 	return nil
 }
 
-// revertDisks restores a previous disk set after a failed converge. Best
-// effort by design: the record is already newer than the hypervisor, and a
-// failed revert only widens that gap by one update.
-func (s *Service) revertDisks(ctx context.Context, id string, disks []core.Disk) error {
+// revertVolumes restores a previous attachment list after a failed converge.
+// Best effort by design: the record is already newer than the hypervisor,
+// and a failed revert only widens that gap by one update.
+func (s *Service) revertVolumes(ctx context.Context, id string, atts []core.VolumeAttachment) error {
 	inst, err := s.cfg.Instances.Get(ctx, id)
 	if err != nil {
 		return err
 	}
-	inst.Disks = disks
+	inst.Volumes = atts
 	_, err = s.cfg.Instances.Update(ctx, inst)
 	return err
 }
 
-// DetachDisk unplugs one extra disk and deletes its file. The root overlay
-// (index 0) is not listed and cannot be detached: it is the VM's disk,
-// not an attachment.
-func (s *Service) DetachDisk(ctx context.Context, id, name string) error {
+// DetachVolume unplugs the volume and frees it back to available storage.
+// Files are never deleted here: only VM delete with DeleteOnTermination
+// removes storage.
+func (s *Service) DetachVolume(ctx context.Context, id, volumeID string) error {
 	inst, err := s.cfg.Instances.Get(ctx, id)
 	if err != nil {
 		return err
 	}
 	if !liveStates(inst.State) {
-		return fmt.Errorf("detach disk in state %s: %w", inst.State, core.ErrInvalidTransition)
+		return fmt.Errorf("detach volume in state %s: %w", inst.State, core.ErrInvalidTransition)
 	}
-	var removed core.Disk
-	kept := inst.Disks[:0:0]
-	for _, d := range inst.Disks {
-		if d.Name == name {
-			removed = d
+	var removed core.VolumeAttachment
+	found := false
+	kept := inst.Volumes[:0:0]
+	for _, att := range inst.Volumes {
+		if att.VolumeID == volumeID {
+			removed = att
+			found = true
 			continue
 		}
-		kept = append(kept, d)
+		kept = append(kept, att)
 	}
-	if removed.Name == "" {
-		return fmt.Errorf("detach disk %q: not attached: %w", name, core.ErrInstanceNotFound)
+	if !found {
+		return fmt.Errorf("detach volume %s: not attached: %w", volumeID, core.ErrInstanceNotFound)
 	}
-	saved := inst.Disks
-	inst.Disks = kept
+	vol, err := s.cfg.Volumes.GetVolume(ctx, volumeID)
+	if err != nil {
+		return err
+	}
+	saved := inst.Volumes
+	inst.Volumes = kept
 	updated, err := s.cfg.Instances.Update(ctx, inst)
 	if err != nil {
 		return err
 	}
+	if _, err := s.cfg.Volumes.DetachVolume(ctx, volumeID); err != nil {
+		_ = s.revertVolumes(ctx, id, saved)
+		return err
+	}
+	req, err := s.createRequestOf(ctx, updated)
+	if err != nil {
+		return err
+	}
 	if err := s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
-		return d.DetachDisk(dctx, createRequestOf(updated), removed)
+		return d.DetachVolume(dctx, req, core.AttachedVolume{Volume: vol, Device: removed.Device})
 	}); err != nil {
-		if rerr := s.revertDisks(ctx, id, saved); rerr != nil {
-			s.cfg.Log.Error("detach revert", "instance", id, "err", rerr)
-		}
 		return err
 	}
 	return nil
 }
 
-// AttachCdrom plugs the iso read-only. At most one: detach first to swap
-// rescue images, explicitly rather than silently replacing boot media.
-func (s *Service) AttachCdrom(ctx context.Context, id, image string) error {
-	inst, err := s.cfg.Instances.Get(ctx, id)
-	if err != nil {
-		return err
-	}
-	if !liveStates(inst.State) {
-		return fmt.Errorf("attach cdrom in state %s: %w", inst.State, core.ErrInvalidTransition)
-	}
-	if image == "" {
-		return fmt.Errorf("attach cdrom: image required: %w", core.ErrInvalidRequest)
-	}
-	if inst.CdromImage != "" {
-		return fmt.Errorf("attach cdrom: %q already attached, detach first: %w", inst.CdromImage, core.ErrInvalidRequest)
-	}
-	inst.CdromImage = image
-	updated, err := s.cfg.Instances.Update(ctx, inst)
-	if err != nil {
-		return err
-	}
-	if err := s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
-		return d.AttachCdrom(dctx, createRequestOf(updated))
-	}); err != nil {
-		inst.CdromImage = ""
-		if _, rerr := s.cfg.Instances.Update(ctx, inst); rerr != nil {
-			s.cfg.Log.Error("attach cdrom revert", "instance", id, "err", rerr)
-		}
-		return err
-	}
-	return nil
-}
-
-// DetachCdrom removes the iso. The file is never deleted: isos are shared,
-// like base images.
-func (s *Service) DetachCdrom(ctx context.Context, id string) error {
-	inst, err := s.cfg.Instances.Get(ctx, id)
-	if err != nil {
-		return err
-	}
-	if !liveStates(inst.State) {
-		return fmt.Errorf("detach cdrom in state %s: %w", inst.State, core.ErrInvalidTransition)
-	}
-	if inst.CdromImage == "" {
-		return fmt.Errorf("detach cdrom: none attached: %w", core.ErrInvalidRequest)
-	}
-	removed := inst.CdromImage
-	inst.CdromImage = ""
-	updated, err := s.cfg.Instances.Update(ctx, inst)
-	if err != nil {
-		return err
-	}
-	if err := s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
-		return d.DetachCdrom(dctx, createRequestOf(updated), removed)
-	}); err != nil {
-		inst.CdromImage = removed
-		if _, rerr := s.cfg.Instances.Update(ctx, inst); rerr != nil {
-			s.cfg.Log.Error("detach cdrom revert", "instance", id, "err", rerr)
-		}
-		return err
-	}
-	return nil
-}
-
-// SetBootDevice selects what boots next: disk or cdrom. Boot order lives in
-// the defined XML, so this is a stopped redefine — never a live change.
-func (s *Service) SetBootDevice(ctx context.Context, id, device string) error {
+// SetBootVolume moves the single boot position to another attached volume:
+// boot_index 0 there, cleared everywhere else, on both rows and mirrors.
+// Boot order lives in the defined XML, so this is a stopped redefine —
+// never a live change. Rescue is attach a cdrom volume, set boot to it,
+// start.
+func (s *Service) SetBootVolume(ctx context.Context, id, volumeID string) error {
 	inst, err := s.cfg.Instances.Get(ctx, id)
 	if err != nil {
 		return err
@@ -322,19 +353,42 @@ func (s *Service) SetBootDevice(ctx context.Context, id, device string) error {
 	if inst.State != core.StateShutoff {
 		return fmt.Errorf("set boot in state %s: stop the VM first: %w", inst.State, core.ErrInvalidTransition)
 	}
-	if device != core.BootDisk && device != core.BootCDROM {
-		return fmt.Errorf("boot device %q: want disk or cdrom: %w", device, core.ErrInvalidRequest)
+	found := false
+	for _, att := range inst.Volumes {
+		if att.VolumeID == volumeID {
+			found = true
+		}
 	}
-	if device == core.BootCDROM && inst.CdromImage == "" {
-		return fmt.Errorf("boot cdrom without an attached iso: %w", core.ErrInvalidRequest)
+	if !found {
+		return fmt.Errorf("set boot %s: not attached: %w", volumeID, core.ErrInvalidRequest)
 	}
-	inst.BootDevice = device
+	for _, att := range inst.Volumes {
+		var want *int
+		if att.VolumeID == volumeID {
+			zero := 0
+			want = &zero
+		}
+		if _, err := s.cfg.Volumes.SetVolumeBootIndex(ctx, att.VolumeID, want); err != nil {
+			return err
+		}
+	}
+	for i := range inst.Volumes {
+		inst.Volumes[i].BootIndex = nil
+		if inst.Volumes[i].VolumeID == volumeID {
+			zero := 0
+			inst.Volumes[i].BootIndex = &zero
+		}
+	}
 	updated, err := s.cfg.Instances.Update(ctx, inst)
 	if err != nil {
 		return err
 	}
+	req, err := s.createRequestOf(ctx, updated)
+	if err != nil {
+		return err
+	}
 	return s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
-		return d.UpdateDisks(dctx, createRequestOf(updated))
+		return d.UpdateVolumes(dctx, req)
 	})
 }
 
@@ -369,10 +423,14 @@ func (s *Service) build(ctx context.Context, id string) error {
 		return fmt.Errorf("get %s: %w", id, err)
 	}
 
+	volumes, err := s.volumeRows(ctx, inst)
+	if err != nil {
+		return fmt.Errorf("resolve volumes %s: %w", id, err)
+	}
 	placed, err := s.cfg.Scheduler.Schedule(ctx, core.PlacementRequest{
 		InstanceID: inst.ID,
 		Flavor:     inst.Flavor,
-		Disks:      inst.Disks,
+		Volumes:    volumes,
 		ImageRef:   inst.ImageRef,
 		Generation: inst.Generation,
 	})
@@ -394,12 +452,12 @@ func (s *Service) build(ctx context.Context, id string) error {
 		return fmt.Errorf("record placement: %w", err)
 	}
 
+	req, err := s.createRequestOf(ctx, inst)
+	if err != nil {
+		return fmt.Errorf("resolve volumes %s: %w", id, err)
+	}
 	if err := s.withEngine(ctx, placed.NodeID, func(dctx context.Context, d core.Driver) error {
-		if _, err := d.Create(dctx, core.CreateRequest{
-			InstanceID: id, NodeID: placed.NodeID, Name: inst.Name, Namespace: inst.Namespace,
-			Flavor: inst.Flavor, Disks: inst.Disks, CdromImage: inst.CdromImage, BootDevice: inst.BootDevice,
-			PinnedCPUs: inst.PinnedCPUs, ImageRef: inst.ImageRef,
-		}); err != nil {
+		if _, err := d.Create(dctx, req); err != nil {
 			return err
 		}
 		return d.Start(dctx, id)
@@ -433,6 +491,14 @@ func (s *Service) fail(ctx context.Context, id string, from core.InstanceState, 
 	inst, err := s.cfg.Instances.Transition(ctx, id, from, core.StateError)
 	if err != nil {
 		return fmt.Errorf("mark error: %w", err)
+	}
+	// Free what the placement claimed: volumes first so a retry starts
+	// unattached, then the node counts. Inline-created volumes stay on disk
+	// as reusable available rows rather than leaking attached.
+	for _, att := range inst.Volumes {
+		if _, derr := s.cfg.Volumes.DetachVolume(ctx, att.VolumeID); derr != nil {
+			s.cfg.Log.Error("reservation leak", "instance", id, "volume", att.VolumeID, "err", derr)
+		}
 	}
 	if err := s.cfg.Instances.ReleaseReservations(ctx, inst.ID, inst.NodeID); err != nil {
 		s.cfg.Log.Error("reservation leak", "instance", id, "node", inst.NodeID, "err", err)

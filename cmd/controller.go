@@ -76,10 +76,8 @@ func subscribe(ctx context.Context, c *app.Controller, log app.Logger) error {
 		{bus.TopicInstanceStart, onInstanceStart(c, log)},
 		{bus.TopicInstanceStop, onInstanceStop(c, log)},
 		{bus.TopicInstanceMigrate, onInstanceMigrate(c, log)},
-		{bus.TopicInstanceAttachDisk, onInstanceAttachDisk(c, log)},
-		{bus.TopicInstanceDetachDisk, onInstanceDetachDisk(c, log)},
-		{bus.TopicInstanceAttachCdrom, onInstanceAttachCdrom(c, log)},
-		{bus.TopicInstanceDetachCdrom, onInstanceDetachCdrom(c, log)},
+		{bus.TopicInstanceAttachVolume, onInstanceAttachVolume(c, log)},
+		{bus.TopicInstanceDetachVolume, onInstanceDetachVolume(c, log)},
 		{bus.TopicInstanceSetBoot, onInstanceSetBoot(c, log)},
 	}
 
@@ -228,60 +226,36 @@ func onInstanceMigrate(c *app.Controller, log app.Logger) func(context.Context, 
 // Storage handlers decode their payload once and hand the rest to compute.
 // Bad payloads are dropped (a poison message must not spin forever);
 // illegal states are parked; a missing instance means the work is gone.
-func onInstanceAttachDisk(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
-	return func(ctx context.Context, cmd bus.Command) error {
-		var payload core.CreateDiskRequest
-		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
-			log.Error("attach-disk dropped: bad payload", "instance", cmd.Target, "err", err)
-			return nil
-		}
-		if err := c.Compute.AttachDisk(ctx, cmd.Target, payload); err != nil {
-			log.Error("attach-disk failed", "instance", cmd.Target, "err", err)
-			return invalidIsParked(log, "attach-disk", cmd.Target, err)
-		}
-		return nil
-	}
-}
-
-func onInstanceDetachDisk(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+func onInstanceAttachVolume(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
 	return func(ctx context.Context, cmd bus.Command) error {
 		var payload struct {
-			Name string `json:"name"`
+			VolumeID  string `json:"volume_id"`
+			BootIndex *int   `json:"boot_index"`
 		}
-		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.Name == "" {
-			log.Error("detach-disk dropped: bad payload", "instance", cmd.Target, "err", err)
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.VolumeID == "" {
+			log.Error("attach-volume dropped: bad payload", "instance", cmd.Target, "err", err)
 			return nil
 		}
-		if err := c.Compute.DetachDisk(ctx, cmd.Target, payload.Name); err != nil {
-			log.Error("detach-disk failed", "instance", cmd.Target, "err", err)
-			return invalidIsParked(log, "detach-disk", cmd.Target, err)
+		if err := c.Compute.AttachVolume(ctx, cmd.Target, payload.VolumeID, payload.BootIndex); err != nil {
+			log.Error("attach-volume failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "attach-volume", cmd.Target, err)
 		}
 		return nil
 	}
 }
 
-func onInstanceAttachCdrom(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+func onInstanceDetachVolume(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
 	return func(ctx context.Context, cmd bus.Command) error {
 		var payload struct {
-			Image string `json:"image"`
+			VolumeID string `json:"volume_id"`
 		}
-		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.Image == "" {
-			log.Error("attach-cdrom dropped: bad payload", "instance", cmd.Target, "err", err)
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.VolumeID == "" {
+			log.Error("detach-volume dropped: bad payload", "instance", cmd.Target, "err", err)
 			return nil
 		}
-		if err := c.Compute.AttachCdrom(ctx, cmd.Target, payload.Image); err != nil {
-			log.Error("attach-cdrom failed", "instance", cmd.Target, "err", err)
-			return invalidIsParked(log, "attach-cdrom", cmd.Target, err)
-		}
-		return nil
-	}
-}
-
-func onInstanceDetachCdrom(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
-	return func(ctx context.Context, cmd bus.Command) error {
-		if err := c.Compute.DetachCdrom(ctx, cmd.Target); err != nil {
-			log.Error("detach-cdrom failed", "instance", cmd.Target, "err", err)
-			return invalidIsParked(log, "detach-cdrom", cmd.Target, err)
+		if err := c.Compute.DetachVolume(ctx, cmd.Target, payload.VolumeID); err != nil {
+			log.Error("detach-volume failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "detach-volume", cmd.Target, err)
 		}
 		return nil
 	}
@@ -290,13 +264,13 @@ func onInstanceDetachCdrom(c *app.Controller, log app.Logger) func(context.Conte
 func onInstanceSetBoot(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
 	return func(ctx context.Context, cmd bus.Command) error {
 		var payload struct {
-			Device string `json:"device"`
+			VolumeID string `json:"volume_id"`
 		}
-		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.Device == "" {
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.VolumeID == "" {
 			log.Error("set-boot dropped: bad payload", "instance", cmd.Target, "err", err)
 			return nil
 		}
-		if err := c.Compute.SetBootDevice(ctx, cmd.Target, payload.Device); err != nil {
+		if err := c.Compute.SetBootVolume(ctx, cmd.Target, payload.VolumeID); err != nil {
 			log.Error("set-boot failed", "instance", cmd.Target, "err", err)
 			return invalidIsParked(log, "set-boot", cmd.Target, err)
 		}

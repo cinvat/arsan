@@ -37,10 +37,10 @@ func setup(t *testing.T) (*Service, *memory.Store, *fake.Driver) {
 	engine := fake.New()
 	driverFor := func(string) (core.Driver, error) { return engine, nil }
 	sched := scheduler.New(scheduler.Config{
-		Instances: st, Nodes: st, DriverFor: driverFor, Log: quiet{},
+		Instances: st, Nodes: st, Volumes: st, DriverFor: driverFor, Log: quiet{},
 	})
 	svc := New(Config{
-		Instances: st, Nodes: st, Scheduler: sched,
+		Instances: st, Nodes: st, Volumes: st, Scheduler: sched,
 		DriverFor: driverFor, Log: quiet{},
 	})
 	return svc, st, engine
@@ -49,7 +49,7 @@ func setup(t *testing.T) (*Service, *memory.Store, *fake.Driver) {
 func pending(t *testing.T, st *memory.Store, name string) core.Instance {
 	t.Helper()
 	inst, err := st.Create(context.Background(), core.Instance{
-		ID: name, Name: name,
+		ID: name, Name: name, Namespace: core.DefaultNamespace,
 		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2},
 		ImageRef: "cirros",
 		State:    core.StatePending,
@@ -58,6 +58,39 @@ func pending(t *testing.T, st *memory.Store, name string) core.Instance {
 		t.Fatal(err)
 	}
 	return inst
+}
+
+// rootVolume creates an available boot volume and returns its id, mirroring
+// what records.Create does for image_ref.
+func rootVolume(t *testing.T, st *memory.Store, instID string) string {
+	t.Helper()
+	ctx := context.Background()
+	zero := 0
+	v, err := st.CreateVolume(ctx, core.Volume{
+		ID: "vol-" + instID + "-root", Name: "root", Namespace: "default",
+		SizeMiB: 32, Image: "cirros", BootIndex: &zero, DeleteOnTermination: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AttachVolume(ctx, v.ID, instID); err != nil {
+		t.Fatal(err)
+	}
+	return v.ID
+}
+
+// withRoot attaches a boot volume to a store-created instance, the way
+// records.Create would have.
+func withRoot(t *testing.T, st *memory.Store, inst core.Instance) core.Instance {
+	t.Helper()
+	id := rootVolume(t, st, inst.ID)
+	zero := 0
+	inst.Volumes = []core.VolumeAttachment{{VolumeID: id, Device: "vda", BootIndex: &zero}}
+	updated, err := st.Update(context.Background(), inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return updated
 }
 
 // Build places, claims, creates and starts: PENDING straight to RUNNING.
@@ -199,41 +232,53 @@ func TestScheduleFailureStaysPendingWithReason(t *testing.T) {
 	}
 }
 
-// Extra disks count against node disk: a flavor that fits with room to
-// spare still queues when its data disk does not.
+// Extra volumes count against node disk: a flavor that fits with room to
+// spare still queues when its data volume does not.
 func TestScheduleFailureOnDiskCapacity(t *testing.T) {
 	st := memory.New()
-	if _, err := st.Register(context.Background(), core.Node{
+	ctx := context.Background()
+	if _, err := st.Register(ctx, core.Node{
 		ID: "n-1", Name: "n1", Enabled: true,
 		Total: core.Resources{CPU: 8, RAM: 1024, Disk: 100},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.SetReadiness(context.Background(), "n-1", core.NodeReady, ""); err != nil {
+	if _, err := st.SetReadiness(ctx, "n-1", core.NodeReady, ""); err != nil {
 		t.Fatal(err)
 	}
 	engine := fake.New()
 	driverFor := func(string) (core.Driver, error) { return engine, nil }
 	sched := scheduler.New(scheduler.Config{
-		Instances: st, Nodes: st, DriverFor: driverFor, Log: quiet{},
+		Instances: st, Nodes: st, Volumes: st, DriverFor: driverFor, Log: quiet{},
 	})
 	svc := New(Config{
-		Instances: st, Nodes: st, Scheduler: sched,
+		Instances: st, Nodes: st, Volumes: st, Scheduler: sched,
 		DriverFor: driverFor, Log: quiet{},
 	})
-	ctx := context.Background()
 	inst, err := st.Create(ctx, core.Instance{
 		ID: "i-1", Name: "i-1",
 		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2},
-		Disks:    []core.Disk{{Name: "data", Index: 1, SizeMiB: 200 * 1024}},
 		ImageRef: "cirros",
 		State:    core.StatePending,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	v, err := st.CreateVolume(ctx, core.Volume{
+		ID: "vol-big", Name: "data", Namespace: "default", SizeMiB: 200 * 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AttachVolume(ctx, v.ID, "i-1"); err != nil {
+		t.Fatal(err)
+	}
+	inst.Volumes = []core.VolumeAttachment{{VolumeID: v.ID, Device: "vda"}}
+	if _, err := st.Update(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.Build(ctx, inst); err == nil {
-		t.Fatal("build with an oversized disk must fail")
+		t.Fatal("build with an oversized volume must fail")
 	}
 	got, _ := st.Get(ctx, "i-1")
 	if got.State != core.StatePending || got.PendingReason == "" {
@@ -241,42 +286,72 @@ func TestScheduleFailureOnDiskCapacity(t *testing.T) {
 	}
 }
 
-// Attach records the disk and converges the engine; detach removes it.
-// Detaching the only extra disk leaves the VM with just its root.
-func TestAttachDetachDisk(t *testing.T) {
+// A build pins its volumes to the winner: the first provisioning decides,
+// and the record carries the pin for every later placement.
+func TestBuildPinsVolumes(t *testing.T) {
 	svc, st, _ := setup(t)
 	ctx := context.Background()
-	inst := pending(t, st, "i-1")
+	inst := withRoot(t, st, pending(t, st, "i-1"))
+	if err := svc.Build(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(ctx, "i-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Volumes) != 1 {
+		t.Fatalf("attachments = %+v, want the root", got.Volumes)
+	}
+	v, err := st.GetVolume(ctx, got.Volumes[0].VolumeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.State != core.VolumeInUse || v.AttachedTo != "i-1" || v.NodeID != "n-1" {
+		t.Fatalf("volume = %+v, want in-use, attached to i-1, pinned to n-1", v)
+	}
+}
+
+// Attach records the volume and converges the engine; detach frees it.
+func TestAttachDetachVolume(t *testing.T) {
+	svc, st, _ := setup(t)
+	ctx := context.Background()
+	inst := withRoot(t, st, pending(t, st, "i-1"))
 	if err := svc.Build(ctx, inst); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.Stop(ctx, "i-1"); err != nil {
 		t.Fatal(err)
 	}
-	q, err := core.ParseQuantity("50GB")
+	v, err := st.CreateVolume(ctx, core.Volume{
+		ID: "vol-data", Name: "data", Namespace: "default", SizeMiB: 50 * 1024,
+		DeleteOnTermination: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	disk := core.CreateDiskRequest{Name: "data", Size: q}
-	if err := svc.AttachDisk(ctx, "i-1", disk); err != nil {
+	if err := svc.AttachVolume(ctx, "i-1", v.ID, nil); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	got, _ := st.Get(ctx, "i-1")
-	if len(got.Disks) != 1 || got.Disks[0].Name != "data" || got.Disks[0].Index != 1 {
-		t.Fatalf("disks = %+v, want one data disk at index 1", got.Disks)
+	if len(got.Volumes) != 2 || got.Volumes[1].VolumeID != v.ID {
+		t.Fatalf("attachments = %+v, want root + data", got.Volumes)
 	}
-	if err := svc.AttachDisk(ctx, "i-1", disk); err == nil {
+	attached, _ := st.GetVolume(ctx, v.ID)
+	if attached.State != core.VolumeInUse || attached.AttachedTo != "i-1" {
+		t.Fatalf("volume = %+v, want in-use by i-1", attached)
+	}
+	if err := svc.AttachVolume(ctx, "i-1", v.ID, nil); err == nil {
 		t.Fatal("double attach must fail")
 	}
-	if err := svc.DetachDisk(ctx, "i-1", "data"); err != nil {
+	if err := svc.DetachVolume(ctx, "i-1", v.ID); err != nil {
 		t.Fatalf("detach: %v", err)
 	}
 	got, _ = st.Get(ctx, "i-1")
-	if len(got.Disks) != 0 {
-		t.Fatalf("disks = %+v, want none", got.Disks)
+	if len(got.Volumes) != 1 {
+		t.Fatalf("attachments = %+v, want only root", got.Volumes)
 	}
-	if err := svc.DetachDisk(ctx, "i-1", "data"); err == nil {
-		t.Fatal("detaching a missing disk must fail")
+	if err := svc.DetachVolume(ctx, "i-1", v.ID); err == nil {
+		t.Fatal("detaching a missing volume must fail")
 	}
 }
 
@@ -285,47 +360,61 @@ func TestAttachDetachDisk(t *testing.T) {
 func TestStorageOpsGuardState(t *testing.T) {
 	svc, st, _ := setup(t)
 	ctx := context.Background()
-	pending(t, st, "i-1")
-	q, _ := core.ParseQuantity("10GB")
-	if err := svc.AttachDisk(ctx, "i-1", core.CreateDiskRequest{Name: "d", Size: q}); err == nil {
+	withRoot(t, st, pending(t, st, "i-1"))
+	if err := svc.AttachVolume(ctx, "i-1", "vol-x", nil); err == nil {
 		t.Fatal("attach to PENDING must fail")
 	}
-	if err := svc.SetBootDevice(ctx, "i-1", core.BootCDROM); err == nil {
+	if err := svc.SetBootVolume(ctx, "i-1", "vol-x"); err == nil {
 		t.Fatal("set-boot on PENDING must fail")
 	}
 }
 
-// Rescue is attach cdrom, boot cdrom, start: boot without an iso is
-// rejected before anything is recorded.
-func TestSetBootDeviceNeedsCdrom(t *testing.T) {
+// Rescue is attach a cdrom volume, boot it, start: booting an unattached
+// volume is rejected before anything is recorded.
+func TestSetBootVolumeNeedsAttach(t *testing.T) {
 	svc, st, _ := setup(t)
 	ctx := context.Background()
-	inst := pending(t, st, "i-1")
+	inst := withRoot(t, st, pending(t, st, "i-1"))
 	if err := svc.Build(ctx, inst); err != nil {
 		t.Fatal(err)
 	}
 	if err := svc.Stop(ctx, "i-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.SetBootDevice(ctx, "i-1", core.BootCDROM); err == nil {
-		t.Fatal("boot cdrom without an iso must fail")
+	if err := svc.SetBootVolume(ctx, "i-1", "vol-ghost"); err == nil {
+		t.Fatal("boot to an unattached volume must fail")
 	}
-	if err := svc.AttachCdrom(ctx, "i-1", "/images/rescue.iso"); err != nil {
+	cd, err := st.CreateVolume(ctx, core.Volume{
+		ID: "vol-rescue", Name: "rescue", Namespace: "default",
+		Image: "https://example.com/rescue.iso", Cdrom: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.AttachVolume(ctx, "i-1", cd.ID, nil); err != nil {
 		t.Fatalf("attach cdrom: %v", err)
 	}
-	if err := svc.SetBootDevice(ctx, "i-1", core.BootCDROM); err != nil {
+	if err := svc.SetBootVolume(ctx, "i-1", cd.ID); err != nil {
 		t.Fatalf("set-boot: %v", err)
 	}
 	got, _ := st.Get(ctx, "i-1")
-	if got.BootDevice != core.BootCDROM || got.CdromImage == "" {
-		t.Fatalf("got boot=%q cdrom=%q", got.BootDevice, got.CdromImage)
+	booted := ""
+	for _, att := range got.Volumes {
+		if v, _ := st.GetVolume(ctx, att.VolumeID); v.BootIndex != nil && *v.BootIndex == 0 {
+			booted = att.VolumeID
+		}
 	}
-	if err := svc.DetachCdrom(ctx, "i-1"); err != nil {
+	if booted != cd.ID {
+		t.Fatalf("boot = %q, want the cdrom", booted)
+	}
+	if err := svc.DetachVolume(ctx, "i-1", cd.ID); err != nil {
 		t.Fatalf("detach cdrom: %v", err)
 	}
 	got, _ = st.Get(ctx, "i-1")
-	if got.CdromImage != "" {
-		t.Fatalf("cdrom still attached: %q", got.CdromImage)
+	for _, att := range got.Volumes {
+		if att.VolumeID == cd.ID {
+			t.Fatal("cdrom still attached")
+		}
 	}
 }
 
