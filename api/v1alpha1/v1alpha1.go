@@ -58,6 +58,11 @@ func Register(r *gin.Engine, cfg Config) {
 	g.DELETE("/virtualmachines/:id", h.DeleteVirtualMachine)
 	g.POST("/virtualmachines/:id/start", h.StartVirtualMachine)
 	g.POST("/virtualmachines/:id/stop", h.StopVirtualMachine)
+	g.POST("/virtualmachines/:id/disks", h.AttachDisk)
+	g.DELETE("/virtualmachines/:id/disks/:name", h.DetachDisk)
+	g.POST("/virtualmachines/:id/cdrom", h.AttachCdrom)
+	g.DELETE("/virtualmachines/:id/cdrom", h.DetachCdrom)
+	g.POST("/virtualmachines/:id/boot", h.SetBootDevice)
 
 	// Flavors. Named, immutable sizing referenced by flavor_ref at VM create.
 	g.POST("/flavors", h.CreateFlavor)

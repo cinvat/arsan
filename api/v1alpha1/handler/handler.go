@@ -117,6 +117,68 @@ func (h *Handler) StopVirtualMachine(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "stopped"})
 }
 
+// AttachDisk enqueues an extra data disk. Size is a Quantity string ("50GB");
+// the controller provisions and hotplugs it, or redefines a stopped guest.
+func (h *Handler) AttachDisk(c *gin.Context) {
+	var req core.CreateDiskRequest
+	if !bind(c, &req) {
+		return
+	}
+	if err := h.instances.AttachDisk(c.Request.Context(), c.Param("id"), req); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "attaching"})
+}
+
+func (h *Handler) DetachDisk(c *gin.Context) {
+	if err := h.instances.DetachDisk(c.Request.Context(), c.Param("id"), c.Param("name")); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "detaching"})
+}
+
+// AttachCdrom enqueues a read-only iso. Boot order itself only changes at
+// define time: attach, set boot to cdrom, start.
+func (h *Handler) AttachCdrom(c *gin.Context) {
+	var req struct {
+		Image string `json:"image"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	if err := h.instances.AttachCdrom(c.Request.Context(), c.Param("id"), req.Image); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "attaching"})
+}
+
+func (h *Handler) DetachCdrom(c *gin.Context) {
+	if err := h.instances.DetachCdrom(c.Request.Context(), c.Param("id")); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "detaching"})
+}
+
+// SetBootDevice selects what boots next, disk or cdrom. The VM must be
+// stopped: boot order lives in the defined XML.
+func (h *Handler) SetBootDevice(c *gin.Context) {
+	var req struct {
+		Device string `json:"device"`
+	}
+	if !bind(c, &req) {
+		return
+	}
+	if err := h.instances.SetBootDevice(c.Request.Context(), c.Param("id"), req.Device); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "setting boot device"})
+}
+
 func (h *Handler) CreateFlavor(c *gin.Context) {
 	var req core.CreateFlavorRequest
 	if !bind(c, &req) {
