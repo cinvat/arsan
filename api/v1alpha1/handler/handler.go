@@ -63,6 +63,10 @@ func (h *Handler) CreateVirtualMachine(c *gin.Context) {
 }
 
 func (h *Handler) ListVirtualMachines(c *gin.Context) {
+	if _, ok := c.GetQuery("watch"); ok {
+		h.WatchVirtualMachines(c)
+		return
+	}
 	insts, err := h.instances.List(c.Request.Context())
 	if err != nil {
 		writeErr(c, err)

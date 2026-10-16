@@ -9,21 +9,30 @@ import (
 )
 
 var watchCmd = &cobra.Command{
-	Use:   "watch nodes",
-	Short: "Stream node states until interrupted",
+	// Both watches stream NDJSON snapshots over one h2c connection: the
+	// client reads, never polls. Level-triggered server-side, so an idle
+	// cluster costs one store read per tick and zero bandwidth.
+	Use:   "watch (nodes|vms)",
+	Short: "Stream node or VM states until interrupted",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if args[0] != "nodes" && args[0] != "node" {
-			return fmt.Errorf("only 'nodes' can be watched, got %q", args[0])
+		c := NewClient(apiURL(cmd))
+		switch args[0] {
+		case "nodes", "node", "no":
+			return watchNodes(c)
+		case "virtualmachines", "virtualmachine", "vm", "vms":
+			return watchVMs(c)
+		default:
+			return fmt.Errorf("only nodes or vms can be watched, got %q", args[0])
 		}
-		return watchNodes(NewClient(apiURL(cmd)))
 	},
 }
 
-// watchNodes streams the server's node snapshots: one JSON object per line,
-// each a full snapshot, until the server closes or the client is interrupted.
-func watchNodes(c *Client) error {
-	resp, err := c.http.Get(c.base + "/nodes?watch=true")
+// stream opens an NDJSON watch and decodes one snapshot per line until the
+// server closes or the client is interrupted. No polling: a quiet server
+// sends nothing, and the scanner blocks until the next newline lands.
+func stream(c *Client, path string, handle func(snap snapshot)) error {
+	resp, err := c.stream.Get(c.base + path)
 	if err != nil {
 		return err
 	}
@@ -38,6 +47,15 @@ func watchNodes(c *Client) error {
 		if err := json.Unmarshal(sc.Bytes(), &snap); err != nil {
 			return err
 		}
+		handle(snap)
+	}
+	return sc.Err()
+}
+
+// watchNodes streams the server's node snapshots: one JSON object per line,
+// each a full snapshot, until the server closes or the client is interrupted.
+func watchNodes(c *Client) error {
+	return stream(c, "/nodes?watch=true", func(snap snapshot) {
 		for _, n := range snap.Nodes {
 			reason := ""
 			if n.NotReadyReason != "" {
@@ -46,8 +64,16 @@ func watchNodes(c *Client) error {
 			fmt.Printf("%-32s %-10s%s\n", n.ID, n.State, reason)
 		}
 		fmt.Println("---")
-	}
-	return sc.Err()
+	})
+}
+
+// watchVMs streams the server's VM snapshots the same way. It replaces the
+// old 2s re-list loop: same output shape, zero request overhead while idle.
+func watchVMs(c *Client) error {
+	return stream(c, "/virtualmachines?watch=true", func(snap snapshot) {
+		printVMs(snap.VirtualMachines)
+		fmt.Println("---")
+	})
 }
 
 func init() {

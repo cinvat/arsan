@@ -17,6 +17,67 @@ import (
 // read per tick and zero bandwidth.
 const snapshotInterval = 2 * time.Second
 
+// WatchVirtualMachines streams the VM list the same way: one NDJSON snapshot
+// per line, level-triggered, until the client goes away. The ?state= filter
+// applies to the stream, so a client can watch PENDING drain to zero.
+func (h *Handler) WatchVirtualMachines(c *gin.Context) {
+	c.Header("Content-Type", "application/x-ndjson")
+	c.Header("Cache-Control", "no-cache")
+	c.Writer.WriteHeader(http.StatusOK)
+	c.Writer.Flush()
+
+	state := c.Query("state")
+	t := time.NewTicker(snapshotInterval)
+	defer t.Stop()
+
+	var last []byte
+	send := func() bool {
+		insts, err := h.instances.List(c.Request.Context())
+		if err != nil {
+			return true
+		}
+		if state != "" {
+			filtered := insts[:0:0]
+			for _, i := range insts {
+				if string(i.State) == state {
+					filtered = append(filtered, i)
+				}
+			}
+			insts = filtered
+		}
+		if insts == nil {
+			insts = []core.Instance{}
+		}
+		raw, err := json.Marshal(map[string]any{"virtualmachines": insts})
+		if err != nil {
+			return true
+		}
+		if bytes.Equal(raw, last) {
+			return true
+		}
+		last = raw
+		if _, err := c.Writer.Write(append(raw, '\n')); err != nil {
+			return false
+		}
+		c.Writer.Flush()
+		return true
+	}
+
+	if !send() {
+		return
+	}
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-t.C:
+			if !send() {
+				return
+			}
+		}
+	}
+}
+
 // WatchNodes streams the node list as newline-delimited JSON, one snapshot
 // per line, until the client goes away:
 //

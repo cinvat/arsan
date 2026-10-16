@@ -2,12 +2,17 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/net/http2"
 )
 
 // Resources mirrors the api's node shape: nodes have CPU, VMs have VCPU.
@@ -94,12 +99,25 @@ type VirtualMachine struct {
 type Client struct {
 	base string
 	http *http.Client
+	// stream has no Timeout: Client.Timeout spans the whole body read, so a
+	// shared deadline would sever every watch after 30s of idleness.
+	stream *http.Client
 }
 
 func NewClient(apiURL string) *Client {
+	// Prior-knowledge h2c, matching the api's unencrypted HTTP/2: watch
+	// streams ride one multiplexed connection instead of one TCP stream
+	// each, with no certificates to manage.
+	tr := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+	}
 	return &Client{
-		base: strings.TrimSuffix(apiURL, "/") + "/v1alpha1",
-		http: &http.Client{Timeout: 30 * time.Second},
+		base:   strings.TrimSuffix(apiURL, "/") + "/v1alpha1",
+		http:   &http.Client{Transport: tr, Timeout: 30 * time.Second},
+		stream: &http.Client{Transport: tr},
 	}
 }
 
@@ -205,7 +223,8 @@ func (c *Client) DeleteVirtualMachine(id string) error {
 	return c.delete("/virtualmachines/" + id)
 }
 
-// snapshot mirrors one NDJSON line of GET /nodes/watch.
+// snapshot mirrors one NDJSON line of a watch stream.
 type snapshot struct {
-	Nodes []Node `json:"nodes"`
+	Nodes           []Node           `json:"nodes"`
+	VirtualMachines []VirtualMachine `json:"virtualmachines"`
 }
