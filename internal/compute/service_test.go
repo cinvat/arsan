@@ -50,7 +50,7 @@ func pending(t *testing.T, st *memory.Store, name string) core.Instance {
 	t.Helper()
 	inst, err := st.Create(context.Background(), core.Instance{
 		ID: name, Name: name,
-		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
+		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2},
 		ImageRef: "cirros",
 		State:    core.StatePending,
 	})
@@ -174,7 +174,7 @@ func TestScheduleFailureStaysPendingWithReason(t *testing.T) {
 	ctx := context.Background()
 	inst, err := st.Create(ctx, core.Instance{
 		ID: "i-1", Name: "i-1",
-		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2, Disk: 10},
+		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2},
 		ImageRef: "cirros",
 		State:    core.StatePending,
 	})
@@ -196,6 +196,136 @@ func TestScheduleFailureStaysPendingWithReason(t *testing.T) {
 	}
 	if got.Generation != 1 {
 		t.Fatalf("generation = %d, want 1 attempt counted", got.Generation)
+	}
+}
+
+// Extra disks count against node disk: a flavor that fits with room to
+// spare still queues when its data disk does not.
+func TestScheduleFailureOnDiskCapacity(t *testing.T) {
+	st := memory.New()
+	if _, err := st.Register(context.Background(), core.Node{
+		ID: "n-1", Name: "n1", Enabled: true,
+		Total: core.Resources{CPU: 8, RAM: 1024, Disk: 100},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetReadiness(context.Background(), "n-1", core.NodeReady, ""); err != nil {
+		t.Fatal(err)
+	}
+	engine := fake.New()
+	driverFor := func(string) (core.Driver, error) { return engine, nil }
+	sched := scheduler.New(scheduler.Config{
+		Instances: st, Nodes: st, DriverFor: driverFor, Log: quiet{},
+	})
+	svc := New(Config{
+		Instances: st, Nodes: st, Scheduler: sched,
+		DriverFor: driverFor, Log: quiet{},
+	})
+	ctx := context.Background()
+	inst, err := st.Create(ctx, core.Instance{
+		ID: "i-1", Name: "i-1",
+		Flavor:   core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 2},
+		Disks:    []core.Disk{{Name: "data", Index: 1, SizeMiB: 200 * 1024}},
+		ImageRef: "cirros",
+		State:    core.StatePending,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Build(ctx, inst); err == nil {
+		t.Fatal("build with an oversized disk must fail")
+	}
+	got, _ := st.Get(ctx, "i-1")
+	if got.State != core.StatePending || got.PendingReason == "" {
+		t.Fatalf("state = %s (%q), want PENDING with a reason", got.State, got.PendingReason)
+	}
+}
+
+// Attach records the disk and converges the engine; detach removes it.
+// Detaching the only extra disk leaves the VM with just its root.
+func TestAttachDetachDisk(t *testing.T) {
+	svc, st, _ := setup(t)
+	ctx := context.Background()
+	inst := pending(t, st, "i-1")
+	if err := svc.Build(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Stop(ctx, "i-1"); err != nil {
+		t.Fatal(err)
+	}
+	q, err := core.ParseQuantity("50GB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk := core.CreateDiskRequest{Name: "data", Size: q}
+	if err := svc.AttachDisk(ctx, "i-1", disk); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	got, _ := st.Get(ctx, "i-1")
+	if len(got.Disks) != 1 || got.Disks[0].Name != "data" || got.Disks[0].Index != 1 {
+		t.Fatalf("disks = %+v, want one data disk at index 1", got.Disks)
+	}
+	if err := svc.AttachDisk(ctx, "i-1", disk); err == nil {
+		t.Fatal("double attach must fail")
+	}
+	if err := svc.DetachDisk(ctx, "i-1", "data"); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	got, _ = st.Get(ctx, "i-1")
+	if len(got.Disks) != 0 {
+		t.Fatalf("disks = %+v, want none", got.Disks)
+	}
+	if err := svc.DetachDisk(ctx, "i-1", "data"); err == nil {
+		t.Fatal("detaching a missing disk must fail")
+	}
+}
+
+// Storage ops refuse the wrong state: attach on a build in flight, boot
+// switches on a running guest.
+func TestStorageOpsGuardState(t *testing.T) {
+	svc, st, _ := setup(t)
+	ctx := context.Background()
+	pending(t, st, "i-1")
+	q, _ := core.ParseQuantity("10GB")
+	if err := svc.AttachDisk(ctx, "i-1", core.CreateDiskRequest{Name: "d", Size: q}); err == nil {
+		t.Fatal("attach to PENDING must fail")
+	}
+	if err := svc.SetBootDevice(ctx, "i-1", core.BootCDROM); err == nil {
+		t.Fatal("set-boot on PENDING must fail")
+	}
+}
+
+// Rescue is attach cdrom, boot cdrom, start: boot without an iso is
+// rejected before anything is recorded.
+func TestSetBootDeviceNeedsCdrom(t *testing.T) {
+	svc, st, _ := setup(t)
+	ctx := context.Background()
+	inst := pending(t, st, "i-1")
+	if err := svc.Build(ctx, inst); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Stop(ctx, "i-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetBootDevice(ctx, "i-1", core.BootCDROM); err == nil {
+		t.Fatal("boot cdrom without an iso must fail")
+	}
+	if err := svc.AttachCdrom(ctx, "i-1", "/images/rescue.iso"); err != nil {
+		t.Fatalf("attach cdrom: %v", err)
+	}
+	if err := svc.SetBootDevice(ctx, "i-1", core.BootCDROM); err != nil {
+		t.Fatalf("set-boot: %v", err)
+	}
+	got, _ := st.Get(ctx, "i-1")
+	if got.BootDevice != core.BootCDROM || got.CdromImage == "" {
+		t.Fatalf("got boot=%q cdrom=%q", got.BootDevice, got.CdromImage)
+	}
+	if err := svc.DetachCdrom(ctx, "i-1"); err != nil {
+		t.Fatalf("detach cdrom: %v", err)
+	}
+	got, _ = st.Get(ctx, "i-1")
+	if got.CdromImage != "" {
+		t.Fatalf("cdrom still attached: %q", got.CdromImage)
 	}
 }
 

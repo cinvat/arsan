@@ -76,6 +76,11 @@ func subscribe(ctx context.Context, c *app.Controller, log app.Logger) error {
 		{bus.TopicInstanceStart, onInstanceStart(c, log)},
 		{bus.TopicInstanceStop, onInstanceStop(c, log)},
 		{bus.TopicInstanceMigrate, onInstanceMigrate(c, log)},
+		{bus.TopicInstanceAttachDisk, onInstanceAttachDisk(c, log)},
+		{bus.TopicInstanceDetachDisk, onInstanceDetachDisk(c, log)},
+		{bus.TopicInstanceAttachCdrom, onInstanceAttachCdrom(c, log)},
+		{bus.TopicInstanceDetachCdrom, onInstanceDetachCdrom(c, log)},
+		{bus.TopicInstanceSetBoot, onInstanceSetBoot(c, log)},
 	}
 
 	for _, h := range handlers {
@@ -215,6 +220,85 @@ func onInstanceMigrate(c *app.Controller, log app.Logger) func(context.Context, 
 		if err := c.Compute.Migrate(ctx, cmd.Target, payload.TargetNodeID); err != nil {
 			log.Error("migrate failed", "instance", cmd.Target, "err", err)
 			return invalidIsParked(log, "migrate", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+// Storage handlers decode their payload once and hand the rest to compute.
+// Bad payloads are dropped (a poison message must not spin forever);
+// illegal states are parked; a missing instance means the work is gone.
+func onInstanceAttachDisk(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		var payload core.CreateDiskRequest
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+			log.Error("attach-disk dropped: bad payload", "instance", cmd.Target, "err", err)
+			return nil
+		}
+		if err := c.Compute.AttachDisk(ctx, cmd.Target, payload); err != nil {
+			log.Error("attach-disk failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "attach-disk", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+func onInstanceDetachDisk(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		var payload struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.Name == "" {
+			log.Error("detach-disk dropped: bad payload", "instance", cmd.Target, "err", err)
+			return nil
+		}
+		if err := c.Compute.DetachDisk(ctx, cmd.Target, payload.Name); err != nil {
+			log.Error("detach-disk failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "detach-disk", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+func onInstanceAttachCdrom(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		var payload struct {
+			Image string `json:"image"`
+		}
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.Image == "" {
+			log.Error("attach-cdrom dropped: bad payload", "instance", cmd.Target, "err", err)
+			return nil
+		}
+		if err := c.Compute.AttachCdrom(ctx, cmd.Target, payload.Image); err != nil {
+			log.Error("attach-cdrom failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "attach-cdrom", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+func onInstanceDetachCdrom(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		if err := c.Compute.DetachCdrom(ctx, cmd.Target); err != nil {
+			log.Error("detach-cdrom failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "detach-cdrom", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+func onInstanceSetBoot(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		var payload struct {
+			Device string `json:"device"`
+		}
+		if err := json.Unmarshal(cmd.Payload, &payload); err != nil || payload.Device == "" {
+			log.Error("set-boot dropped: bad payload", "instance", cmd.Target, "err", err)
+			return nil
+		}
+		if err := c.Compute.SetBootDevice(ctx, cmd.Target, payload.Device); err != nil {
+			log.Error("set-boot failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "set-boot", cmd.Target, err)
 		}
 		return nil
 	}

@@ -111,6 +111,13 @@ const (
 	TopicInstanceStart   = "instance.start"
 	TopicInstanceStop    = "instance.stop"
 	TopicInstanceMigrate = "instance.migrate"
+	// Storage commands converge one VM's disks to its record: attach and
+	// detach work live on a running guest, boot switches need it stopped.
+	TopicInstanceAttachDisk   = "instance.attach-disk"
+	TopicInstanceDetachDisk   = "instance.detach-disk"
+	TopicInstanceAttachCdrom  = "instance.attach-cdrom"
+	TopicInstanceDetachCdrom  = "instance.detach-cdrom"
+	TopicInstanceSetBoot      = "instance.set-boot"
 	// TopicNodeRegistered is published by the api after a node's bootstrap
 	// is accepted, so the controller starts managing it.
 	TopicNodeRegistered = "node.registered"
