@@ -31,19 +31,11 @@ func (PinnedVolumeFilter) Name() string { return "PinnedVolume" }
 // migrate, so a request naming a volume pinned elsewhere has exactly one
 // eligible node — or none, which is a pending reason, not an error.
 func (PinnedVolumeFilter) FilterNodes(_ context.Context, req core.PlacementRequest, nodes []core.Node) ([]core.Node, error) {
-	out := nodes[:0:0]
-	for _, n := range nodes {
-		ok := true
-		for _, v := range req.Volumes {
-			if v.NodeID != "" && v.NodeID != n.ID {
-				ok = false
-				break
-			}
-		}
-		if ok {
-			out = append(out, n)
-		}
-	}
+	out := lo.Filter(nodes, func(n core.Node, _ int) bool {
+		return lo.EveryBy(req.Volumes, func(v core.Volume) bool {
+			return v.NodeID == "" || v.NodeID == n.ID
+		})
+	})
 	return out, nil
 }
 
@@ -53,13 +45,9 @@ func (CapacityFilter) Name() string { return "Capacity" }
 
 func (CapacityFilter) FilterNodes(_ context.Context, req core.PlacementRequest, nodes []core.Node) ([]core.Node, error) {
 	want := req.Flavor.Resources().Add(core.VolumeResources(req.Volumes))
-	out := nodes[:0:0]
-	for _, n := range nodes {
-		if n.Available.Fits(want) {
-			out = append(out, n)
-		}
-	}
-	return out, nil
+	return lo.Filter(nodes, func(n core.Node, _ int) bool {
+		return n.Available.Fits(want)
+	}), nil
 }
 
 type ArchFilter struct{}
@@ -67,12 +55,9 @@ type ArchFilter struct{}
 func (ArchFilter) Name() string { return "Arch" }
 
 func (ArchFilter) FilterNodes(_ context.Context, req core.PlacementRequest, nodes []core.Node) ([]core.Node, error) {
-	out := nodes[:0:0]
-	for _, n := range nodes {
-		if n.Arch == "" || n.Arch == "amd64" { // Simplified for now
-			out = append(out, n)
-		}
-	}
+	out := lo.Filter(nodes, func(n core.Node, _ int) bool {
+		return n.Arch == "" || n.Arch == "amd64" // Simplified for now
+	})
 	return out, nil
 }
 

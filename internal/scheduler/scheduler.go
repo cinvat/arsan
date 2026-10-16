@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/cinvat/arsan/internal/core"
+	"github.com/samber/lo"
 )
 
 const DefaultMaxAttempts = 5
@@ -143,18 +144,19 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 		// Claim every volume: compare-and-swap on available holds exactly
 		// one holder, so two VMs racing for one prepared disk resolve here.
 		attached := make([]string, 0, len(req.Volumes))
+		releaseVolumes := func() {
+			lo.ForEach(attached, func(id string, _ int) {
+				_, _ = s.volumes.DetachVolume(ctx, id)
+			})
+		}
 		volumeLost := ""
 		for _, v := range req.Volumes {
 			if _, err := s.volumes.AttachVolume(ctx, v.ID, req.InstanceID); err != nil {
-				if errors.Is(err, core.ErrCapacityConflict) {
-					volumeLost = v.ID
-				} else if errors.Is(err, core.ErrVolumeNotFound) {
+				if errors.Is(err, core.ErrCapacityConflict) || errors.Is(err, core.ErrVolumeNotFound) {
 					volumeLost = v.ID
 				} else {
 					release()
-					for _, id := range attached {
-						_, _ = s.volumes.DetachVolume(ctx, id)
-					}
+					releaseVolumes()
 					return core.Placement{}, fmt.Errorf("claim volumes %s: %w", winner.NodeID, err)
 				}
 				break
@@ -163,9 +165,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 		}
 		if volumeLost != "" {
 			release()
-			for _, id := range attached {
-				_, _ = s.volumes.DetachVolume(ctx, id)
-			}
+			releaseVolumes()
 			lastConflict = fmt.Sprintf("attempt %d: volume %s no longer available", attempt, volumeLost)
 			s.log.Warn("claim lost, retrying", "attempt", attempt, "node", winner.NodeID)
 			continue
@@ -181,9 +181,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 			}
 			if _, err := s.volumes.PinVolume(ctx, v.ID, winner.NodeID); err != nil {
 				release()
-				for _, id := range attached {
-					_, _ = s.volumes.DetachVolume(ctx, id)
-				}
+				releaseVolumes()
 				lastConflict = fmt.Sprintf("attempt %d: volume %s pinned elsewhere", attempt, v.ID)
 				s.log.Warn("claim lost, retrying", "attempt", attempt, "node", winner.NodeID)
 				volumeLost = v.ID
@@ -195,9 +193,7 @@ func (s *Scheduler) Schedule(ctx context.Context, req core.PlacementRequest) (co
 		}
 		if err := s.nodes.AttachInstance(ctx, winner.NodeID, req.InstanceID); err != nil {
 			release()
-			for _, id := range attached {
-				_, _ = s.volumes.DetachVolume(ctx, id)
-			}
+			releaseVolumes()
 			return core.Placement{}, fmt.Errorf("attach instance: %w", err)
 		}
 
@@ -297,11 +293,9 @@ func (s *Scheduler) rejectReasons(ctx context.Context, req core.PlacementRequest
 }
 
 func explain(w WeighedNode, runnerUp string) string {
-	keys := slices.Sorted(maps.Keys(w.Detail))
-	parts := make([]string, 0, len(keys))
-	for _, k := range keys {
-		parts = append(parts, fmt.Sprintf("%s=%d", k, w.Detail[k]))
-	}
+	parts := lo.Map(slices.Sorted(maps.Keys(w.Detail)), func(k string, _ int) string {
+		return fmt.Sprintf("%s=%d", k, w.Detail[k])
+	})
 	s := fmt.Sprintf("%s won with %s (total %d)", w.NodeID, strings.Join(parts, " "), w.Score)
 	if runnerUp != "" {
 		s += "; next best " + runnerUp
