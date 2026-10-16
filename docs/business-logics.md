@@ -430,9 +430,9 @@ the decision that was actually applied.
 ### Instance states
 
 States are split by who owns them. The control plane owns `PENDING`,
-`SCHEDULING`, `BUILDING` and `ERROR`; the hypervisor owns `RUNNING`,
-`SHUTOFF`, `SHUTDOWN`, `PAUSED` and `CRASHED`. The guest names mirror
-libvirt's `virDomainState` one-for-one, except `BLOCKED` (folds into
+`SCHEDULING`, `BUILDING`, `TERMINATING` and `ERROR`; the hypervisor owns
+`RUNNING`, `SHUTOFF`, `SHUTDOWN`, `PAUSED` and `CRASHED`. The guest names
+mirror libvirt's `virDomainState` one-for-one, except `BLOCKED` (folds into
 `RUNNING` — it is running but waiting on I/O) and `PMSUSPENDED` (folds into
 `PAUSED`), which are too fine to act on, and `NOSTATE`, which is never
 stored: it means libvirt itself does not know.
@@ -448,12 +448,20 @@ Observed state converges on every passing probe: the controller lists the
 engine's domains and transitions steady records toward them, so a `virsh
 destroy` behind arsan's back flips `RUNNING` to `SHUTOFF` within one probe
 interval. Only steady states move, and only between steady states; `PENDING`,
-`SCHEDULING`, `BUILDING` and `ERROR` belong to whoever put the record there,
-and hand-made domains (no record) are ignored. Absence is also an answer —
-the probe just round-tripped that engine — except when the listing itself
-fails, which converges nothing rather than mass-shutting-off on a partial
-answer. A lost compare-and-swap is skipped, not forced: whoever moved the
-record holds the newer truth.
+`SCHEDULING`, `BUILDING`, `TERMINATING` and `ERROR` belong to whoever put
+the record there, and hand-made domains (no record) are ignored. Absence is
+also an answer — the probe just round-tripped that engine — except when the
+listing itself fails, which converges nothing rather than
+mass-shutting-off on a partial answer. A lost compare-and-swap is skipped,
+not forced: whoever moved the record holds the newer truth.
+
+Delete is mark-then-teardown: the api transitions the row to `TERMINATING`
+synchronously, so the intent is visible even when the agent's host is off,
+and the controller (command handler plus the sweep, which drives
+`TERMINATING` rows on every pass with no staleness gate) tears down
+asynchronously until the row can go away. Engine `Delete` is idempotent, so
+redelivered commands and sweep retries converge instead of wedging, and a
+re-delete re-publishes rather than erroring.
 
 ### The bus is NATS JetStream
 
@@ -478,7 +486,7 @@ exactly the case that matters.
 |---|---|
 | `node.registered` | a node exists and can be dialled at the address it declared |
 | `instance.create` | build an instance the api has persisted as `PENDING` |
-| `instance.delete` | tear down, then release the reservation |
+| `instance.delete` | tear down a `TERMINATING` row, then release the reservation |
 | `instance.start` | `SHUTOFF` → build |
 | `instance.stop` | `RUNNING` → `SHUTOFF`, reservation retained |
 | `instance.migrate` | move to a named target host |
