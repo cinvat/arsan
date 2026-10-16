@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"sync"
 
@@ -69,20 +71,42 @@ func (d *Driver) do(ctx context.Context, fn func() error) error {
 	}
 }
 
-// lookup returns the domain handle, or nil when it is not defined. A lookup
-// miss is not an error here because every operation treats "already gone" as
-// success; callers that need existence check for nil themselves.
+// lookup returns the domain handle for an instance id, or nil when it is not
+// defined. A lookup miss is not an error here because every operation treats
+// "already gone" as success; callers that need existence check for nil
+// themselves.
+//
+// The fast path is the legacy "arsan-<id>" name. Namespaced domains are
+// found by scanning for our metadata id, which id-only operations cannot
+// derive from the id alone. The scan costs one list plus XML reads, paid
+// only on lifecycle operations, never on the scheduling hot path.
 //
 // The handle must be freed by the caller.
-func (d *Driver) lookup(name string) (*libvirt.Domain, error) {
-	dom, err := d.conn.LookupDomainByName(name)
-	if err != nil {
-		if errors.Is(err, libvirt.ERR_NO_DOMAIN) {
-			return nil, nil
-		}
+func (d *Driver) lookup(id string) (*libvirt.Domain, error) {
+	dom, err := d.conn.LookupDomainByName("arsan-" + id)
+	if err == nil {
+		return dom, nil
+	}
+	if !errors.Is(err, libvirt.ERR_NO_DOMAIN) {
 		return nil, err
 	}
-	return dom, nil
+	doms, err := d.conn.ListAllDomains(0)
+	if err != nil {
+		return nil, err
+	}
+	for i := range doms {
+		dom := &doms[i]
+		desc, err := dom.GetXMLDesc(0)
+		if err != nil {
+			dom.Free()
+			continue
+		}
+		if got, ok := parseDomainInstanceID(desc); ok && got == id {
+			return dom, nil
+		}
+		dom.Free()
+	}
+	return nil, nil
 }
 
 // pinsCurrent reports whether dom's definition already matches req's pinning.
@@ -114,7 +138,7 @@ func (d *Driver) Validate(ctx context.Context, f core.Flavor) error {
 	if err := f.VCPU.Validate(); err != nil {
 		return fmt.Errorf("kvm: flavor %q has no resources: %w", f.Name, core.ErrRequestRejected)
 	}
-	if f.RAM <= 0 || f.Disk <= 0 {
+	if f.RAM <= 0 {
 		return fmt.Errorf("kvm: flavor %q has no resources: %w", f.Name, core.ErrRequestRejected)
 	}
 	return d.do(ctx, func() error {
@@ -147,8 +171,14 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 		return core.InstanceInfo{}, err
 	}
 	req.ImageRef = disk
+	// Provision owned volumes before defining: the root overlay plus every
+	// extra. Missing qemu-img or an unwritable images dir fails here, before
+	// any domain exists to clean up.
+	if err := d.provisionAll(ctx, req); err != nil {
+		return core.InstanceInfo{}, err
+	}
 	err = d.do(ctx, func() error {
-		dom, err := d.lookup(domainName(req.InstanceID))
+		dom, err := d.lookup(req.InstanceID)
 		if err != nil {
 			return err
 		}
@@ -167,7 +197,7 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 				return err
 			}
 		}
-		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req.InstanceID), req))
+		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req))
 		if err != nil {
 			return err
 		}
@@ -182,8 +212,8 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 
 // running reports whether the domain is up. A missing domain is not an error;
 // callers decide what absence means for their operation.
-func (d *Driver) running(name string) (exists, running bool, err error) {
-	dom, err := d.lookup(name)
+func (d *Driver) running(id string) (exists, running bool, err error) {
+	dom, err := d.lookup(id)
 	if err != nil || dom == nil {
 		return dom != nil, false, err
 	}
@@ -198,7 +228,7 @@ func (d *Driver) running(name string) (exists, running bool, err error) {
 // Start boots the domain. An already-running domain is success.
 func (d *Driver) Start(ctx context.Context, id string) error {
 	return d.do(ctx, func() error {
-		exists, running, err := d.running(domainName(id))
+		exists, running, err := d.running(id)
 		if err != nil {
 			return err
 		}
@@ -208,7 +238,7 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 		if running {
 			return nil
 		}
-		dom, err := d.lookup(domainName(id))
+		dom, err := d.lookup(id)
 		if err != nil || dom == nil {
 			return core.ErrInstanceNotFound
 		}
@@ -221,14 +251,14 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 // missing domain is success.
 func (d *Driver) Stop(ctx context.Context, id string) error {
 	return d.do(ctx, func() error {
-		exists, running, err := d.running(domainName(id))
+		exists, running, err := d.running(id)
 		if err != nil {
 			return err
 		}
 		if !exists || !running {
 			return nil
 		}
-		dom, err := d.lookup(domainName(id))
+		dom, err := d.lookup(id)
 		if err != nil || dom == nil {
 			return nil
 		}
@@ -240,15 +270,21 @@ func (d *Driver) Stop(ctx context.Context, id string) error {
 	})
 }
 
-// Delete undefines the domain, stopping it first if needed. Storage is never
-// removed: the disk may be a shared base image. A missing domain is success.
+// Delete undefines the domain, stopping it first if needed, then removes the
+// volumes this driver provisioned (root overlay plus extras, read off the
+// domain's own metadata). Bases and isos are never touched: they are shared.
+// A missing domain is success.
 func (d *Driver) Delete(ctx context.Context, id string) error {
 	return d.do(ctx, func() error {
-		dom, err := d.lookup(domainName(id))
+		dom, err := d.lookup(id)
 		if err != nil || dom == nil {
 			return nil
 		}
 		defer dom.Free()
+		desc, err := dom.GetXMLDesc(0)
+		if err != nil {
+			return err
+		}
 		state, _, err := dom.GetState()
 		if err != nil {
 			return err
@@ -258,15 +294,255 @@ func (d *Driver) Delete(ctx context.Context, id string) error {
 				return err
 			}
 		}
-		return dom.Undefine()
+		if err := dom.Undefine(); err != nil {
+			return err
+		}
+		for _, f := range parseDomainVolumes(desc) {
+			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		return nil
 	})
+}
+
+// UpdateDisks redefines a stopped domain with a new disk set: attach and
+// detach on SHUTOFF, and boot-device switches, all converge here. Provision
+// first so a failed qemu-img leaves the old definition alone.
+func (d *Driver) UpdateDisks(ctx context.Context, req core.CreateRequest) error {
+	return d.do(ctx, func() error {
+		dom, err := d.lookup(req.InstanceID)
+		if err != nil {
+			return err
+		}
+		if dom == nil {
+			return core.ErrInstanceNotFound
+		}
+		defer dom.Free()
+		if err := d.provisionMissing(ctx, req); err != nil {
+			return err
+		}
+		state, _, err := dom.GetState()
+		if err != nil {
+			return err
+		}
+		if state == libvirt.DOMAIN_RUNNING {
+			return fmt.Errorf("kvm: update disks of a running domain: stop it first: %w", core.ErrInvalidTransition)
+		}
+		if err := dom.Undefine(); err != nil {
+			return err
+		}
+		dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req))
+		if err != nil {
+			return err
+		}
+		defer dom.Free()
+		return nil
+	})
+}
+
+// AttachDisk provisions one extra disk and hotplugs it: live plus config
+// when the guest runs, redefine when it does not. The record already carries
+// the disk; the engine only converges the hypervisor to it.
+func (d *Driver) AttachDisk(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
+	return d.do(ctx, func() error {
+		if err := d.provisionVolume(ctx, req, disk); err != nil {
+			return err
+		}
+		dom, err := d.lookup(req.InstanceID)
+		if err != nil {
+			return err
+		}
+		if dom == nil {
+			return core.ErrInstanceNotFound
+		}
+		defer dom.Free()
+		state, _, err := dom.GetState()
+		if err != nil {
+			return err
+		}
+		if state != libvirt.DOMAIN_RUNNING {
+			return d.redefine(ctx, req)
+		}
+		return dom.AttachDeviceFlags(
+			diskDeviceXML(targetDev(disk.Index), dataVolume(req, disk), ""),
+			libvirt.DOMAIN_DEVICE_MODIFY_LIVE|libvirt.DOMAIN_DEVICE_MODIFY_CONFIG,
+		)
+	})
+}
+
+// DetachDisk removes one extra disk and deletes its file: live plus config
+// when the guest runs, redefine when it does not. The record already dropped
+// it; the file delete always happens, so a shutoff detach cannot strand storage.
+func (d *Driver) DetachDisk(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
+	return d.do(ctx, func() error {
+		dom, err := d.lookup(req.InstanceID)
+		if err != nil {
+			return err
+		}
+		if dom == nil {
+			// No domain left: still delete the file below, then done.
+		} else {
+			defer dom.Free()
+			state, _, err := dom.GetState()
+			if err != nil {
+				return err
+			}
+			if state == libvirt.DOMAIN_RUNNING {
+				if err := dom.DetachDeviceFlags(
+					diskDeviceXML(targetDev(disk.Index), dataVolume(req, disk), ""),
+					libvirt.DOMAIN_DEVICE_MODIFY_LIVE|libvirt.DOMAIN_DEVICE_MODIFY_CONFIG,
+				); err != nil {
+					return err
+				}
+			} else if err := d.redefine(ctx, req); err != nil {
+				return err
+			}
+		}
+		if err := os.Remove(dataVolume(req, disk)); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	})
+}
+
+// AttachCdrom hotplugs the iso read-only; DetachCdrom removes it. Boot order
+// itself only ever changes at define time, so booting the rescue image is
+// attach, set boot to cdrom (a stopped redefine), start.
+func (d *Driver) AttachCdrom(ctx context.Context, req core.CreateRequest) error {
+	return d.do(ctx, func() error {
+		dom, err := d.lookup(req.InstanceID)
+		if err != nil {
+			return err
+		}
+		if dom == nil {
+			return core.ErrInstanceNotFound
+		}
+		defer dom.Free()
+		state, _, err := dom.GetState()
+		if err != nil {
+			return err
+		}
+		if state != libvirt.DOMAIN_RUNNING {
+			return d.redefine(ctx, req)
+		}
+		return dom.AttachDeviceFlags(
+			cdromDeviceXML(req.CdromImage, ""),
+			libvirt.DOMAIN_DEVICE_MODIFY_LIVE|libvirt.DOMAIN_DEVICE_MODIFY_CONFIG,
+		)
+	})
+}
+
+func (d *Driver) DetachCdrom(ctx context.Context, req core.CreateRequest, image string) error {
+	return d.do(ctx, func() error {
+		dom, err := d.lookup(req.InstanceID)
+		if err != nil {
+			return err
+		}
+		if dom == nil {
+			return nil
+		}
+		defer dom.Free()
+		state, _, err := dom.GetState()
+		if err != nil {
+			return err
+		}
+		if state == libvirt.DOMAIN_RUNNING {
+			return dom.DetachDeviceFlags(
+				cdromDeviceXML(image, ""),
+				libvirt.DOMAIN_DEVICE_MODIFY_LIVE|libvirt.DOMAIN_DEVICE_MODIFY_CONFIG,
+			)
+		}
+		return d.redefine(ctx, req)
+	})
+}
+
+// redefine swaps the definition for a freshly rendered one. The caller holds
+// the do-mutex and has checked the domain is not running.
+func (d *Driver) redefine(ctx context.Context, req core.CreateRequest) error {
+	dom, err := d.lookup(req.InstanceID)
+	if err != nil {
+		return err
+	}
+	if dom == nil {
+		return core.ErrInstanceNotFound
+	}
+	defer dom.Free()
+	if err := dom.Undefine(); err != nil {
+		return err
+	}
+	dom, err = d.conn.DomainDefineXML(domainXML(domainName(req), req))
+	if err != nil {
+		return err
+	}
+	defer dom.Free()
+	return nil
+}
+
+// provisionAll creates every owned volume for a fresh build. Root overlays
+// its base; extras overlay their own base or provision blank. Existing files
+// are left alone, so a retried build is a no-op here too.
+func (d *Driver) provisionAll(ctx context.Context, req core.CreateRequest) error {
+	if err := d.provisionVolume(ctx, req, core.Disk{Index: 0, Image: req.ImageRef}); err != nil {
+		return err
+	}
+	return d.provisionMissing(ctx, req)
+}
+
+// provisionMissing creates files for extra disks that lack them, as opposed
+// to every file unconditionally — the common case on redefines.
+func (d *Driver) provisionMissing(ctx context.Context, req core.CreateRequest) error {
+	for _, disk := range req.Disks {
+		if err := d.provisionVolume(ctx, req, disk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// provisionVolume creates one qcow2 if absent: an overlay of Image, or a blank
+// disk of SizeMiB. A blank disk without a size is a request bug, reported
+// rather than guessed at.
+func (d *Driver) provisionVolume(ctx context.Context, req core.CreateRequest, disk core.Disk) error {
+	path := rootVolume(req)
+	if disk.Index != 0 {
+		path = dataVolume(req, disk)
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	if _, err := exec.LookPath("qemu-img"); err != nil {
+		return fmt.Errorf("kvm: qemu-img not found in PATH: %w", err)
+	}
+	args := []string{"create", "-f", "qcow2"}
+	if disk.Image != "" {
+		args = append(args, "-F", "qcow2", "-b", disk.Image)
+	} else {
+		if disk.SizeMiB <= 0 {
+			return fmt.Errorf("kvm: blank disk needs a size: %w", core.ErrRequestRejected)
+		}
+		args = append(args, qemuImgSize(disk.SizeMiB))
+	}
+	args = append(args, path)
+	if out, err := exec.CommandContext(ctx, "qemu-img", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("kvm: qemu-img create %s: %s: %w", path, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// qemuImgSize renders MiB in qemu-img's K/M/G units, preferring whole GB.
+func qemuImgSize(mib int) string {
+	if mib%1024 == 0 {
+		return fmt.Sprintf("%dG", mib/1024)
+	}
+	return fmt.Sprintf("%dM", mib)
 }
 
 // Reboot restarts the domain, falling back to stop+start when the guest path
 // fails.
 func (d *Driver) Reboot(ctx context.Context, id string) error {
 	err := d.do(ctx, func() error {
-		dom, err := d.lookup(domainName(id))
+		dom, err := d.lookup(id)
 		if err != nil {
 			return err
 		}
@@ -349,15 +625,25 @@ func (d *Driver) Domains(ctx context.Context) ([]core.DomainStatus, error) {
 		}
 		for i := range doms {
 			dom := &doms[i]
-			name, err := dom.GetName()
+			desc, err := dom.GetXMLDesc(0)
 			if err != nil {
 				dom.Free()
 				continue
 			}
-			id, ok := strings.CutPrefix(name, "arsan-")
+			id, ok := parseDomainInstanceID(desc)
 			if !ok {
-				dom.Free()
-				continue
+				// Domains defined before metadata existed carry only the
+				// legacy "arsan-<id>" name; read the id back off it so an
+				// upgrade does not report them missing.
+				name, err := dom.GetName()
+				if err != nil {
+					dom.Free()
+					continue
+				}
+				if id, ok = strings.CutPrefix(name, "arsan-"); !ok {
+					dom.Free()
+					continue
+				}
 			}
 			state, _, err := dom.GetState()
 			dom.Free()
