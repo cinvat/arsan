@@ -28,6 +28,13 @@ const (
 	OpMigrate  Operation = "migrate"
 	OpUsage    Operation = "usage"
 	OpDomains  Operation = "domains"
+	// Storage ops converge one VM's disks to the record: update on SHUTOFF,
+	// attach/detach live when the guest runs.
+	OpUpdateDisks Operation = "update-disks"
+	OpAttachDisk  Operation = "attach-disk"
+	OpDetachDisk  Operation = "detach-disk"
+	OpAttachCdrom Operation = "attach-cdrom"
+	OpDetachCdrom Operation = "detach-cdrom"
 )
 
 // Request is one engine call.
@@ -36,7 +43,13 @@ type Request struct {
 	InstanceID   string      `json:"instance_id,omitempty"`
 	NodeID       string      `json:"node_id,omitempty"`
 	Name         string      `json:"name,omitempty"`
+	Namespace    string      `json:"namespace,omitempty"`
 	Flavor       core.Flavor `json:"flavor,omitempty"`
+	Disks        []core.Disk `json:"disks,omitempty"`
+	Disk         core.Disk   `json:"disk,omitempty"`
+	CdromImage   string      `json:"cdrom_image,omitempty"`
+	DetachedImage string     `json:"detached_image,omitempty"`
+	BootDevice   string      `json:"boot_device,omitempty"`
 	PinnedCPUs   []int       `json:"pinned_cpus,omitempty"`
 	ImageRef     string      `json:"image_ref,omitempty"`
 	TargetNodeID string      `json:"target_node_id,omitempty"`
@@ -118,8 +131,9 @@ func (w *Worker) exec(ctx context.Context, req Request) (Response, error) {
 		return Response{}, nil
 	case OpCreate:
 		info, err := w.driver.Create(ctx, core.CreateRequest{
-			InstanceID: req.InstanceID, NodeID: req.NodeID, Name: req.Name,
-			Flavor: req.Flavor, PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
+			InstanceID: req.InstanceID, NodeID: req.NodeID, Name: req.Name, Namespace: req.Namespace,
+			Flavor: req.Flavor, Disks: req.Disks, CdromImage: req.CdromImage, BootDevice: req.BootDevice,
+			PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
 		})
 		if err != nil {
 			return Response{}, err
@@ -147,8 +161,29 @@ func (w *Worker) exec(ctx context.Context, req Request) (Response, error) {
 			return Response{}, err
 		}
 		return Response{Domains: domains}, nil
+	case OpUpdateDisks:
+		return Response{}, w.driver.UpdateDisks(ctx, createRequestOf(req))
+	case OpAttachDisk:
+		return Response{}, w.driver.AttachDisk(ctx, createRequestOf(req), req.Disk)
+	case OpDetachDisk:
+		return Response{}, w.driver.DetachDisk(ctx, createRequestOf(req), req.Disk)
+	case OpAttachCdrom:
+		return Response{}, w.driver.AttachCdrom(ctx, createRequestOf(req))
+	case OpDetachCdrom:
+		return Response{}, w.driver.DetachCdrom(ctx, createRequestOf(req), req.DetachedImage)
 	default:
 		return Response{}, fmt.Errorf("unknown op %q", req.Op)
+	}
+}
+
+// createRequestOf rebuilds the engine request from a storage op envelope.
+// Attach and detach carry the full post-mutation record state, so the engine
+// converges to it without ever reading the api.
+func createRequestOf(req Request) core.CreateRequest {
+	return core.CreateRequest{
+		InstanceID: req.InstanceID, NodeID: req.NodeID, Name: req.Name, Namespace: req.Namespace,
+		Flavor: req.Flavor, Disks: req.Disks, CdromImage: req.CdromImage, BootDevice: req.BootDevice,
+		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
 	}
 }
 
