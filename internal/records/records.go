@@ -349,8 +349,22 @@ func (s *Instances) List(ctx context.Context) ([]core.Instance, error) {
 // Delete publishes a command rather than removing the row. The record has to
 // outlive the request so the controller can tear the VM down and release its
 // reservation; deleting it here would strand both.
+// Delete marks the instance TERMINATING and asks the controller to tear it
+// down. The mark happens synchronously so the intent is visible even when
+// the agent is unreachable; the teardown is asynchronous and retried by the
+// sweep until the row can go away. Re-deleting a TERMINATING instance
+// re-publishes rather than erroring, so a stuck delete is retryable.
 func (s *Instances) Delete(ctx context.Context, id string) error {
-	return s.command(ctx, bus.TopicInstanceDelete, id)
+	inst, err := s.Store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if inst.State != core.StateTerminating {
+		if _, err := s.Store.Transition(ctx, id, inst.State, core.StateTerminating); err != nil {
+			return err
+		}
+	}
+	return s.publish(ctx, bus.TopicInstanceDelete, id, nil)
 }
 
 // Start and Stop publish commands for the same reason: the api does not decide
