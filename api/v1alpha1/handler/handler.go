@@ -10,7 +10,16 @@ import (
 
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/gin-gonic/gin"
+	"github.com/samber/lo"
 )
+
+// filterByState keeps the VMs in a state, so list and watch agree on what
+// ?state= means instead of drifting into two implementations.
+func filterByState(insts []core.Instance, state string) []core.Instance {
+	return lo.Filter(insts, func(i core.Instance, _ int) bool {
+		return string(i.State) == state
+	})
+}
 
 // Handler holds the services this version's routes call.
 type Handler struct {
@@ -74,13 +83,7 @@ func (h *Handler) ListVirtualMachines(c *gin.Context) {
 		return
 	}
 	if state := c.Query("state"); state != "" {
-		filtered := insts[:0:0]
-		for _, i := range insts {
-			if string(i.State) == state {
-				filtered = append(filtered, i)
-			}
-		}
-		insts = filtered
+		insts = filterByState(insts, state)
 	}
 	c.JSON(http.StatusOK, insts)
 }

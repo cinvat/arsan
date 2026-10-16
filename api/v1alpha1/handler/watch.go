@@ -37,13 +37,7 @@ func (h *Handler) WatchVirtualMachines(c *gin.Context) {
 			return true
 		}
 		if state != "" {
-			filtered := insts[:0:0]
-			for _, i := range insts {
-				if string(i.State) == state {
-					filtered = append(filtered, i)
-				}
-			}
-			insts = filtered
+			insts = filterByState(insts, state)
 		}
 		if insts == nil {
 			insts = []core.Instance{}
