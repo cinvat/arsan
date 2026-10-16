@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 )
 
@@ -40,61 +41,36 @@ func completeNames(cmd *cobra.Command, args []string, _ string) ([]string, cobra
 	}
 	c := NewClient(apiURL(cmd))
 	ns, _ := cmd.Flags().GetString("namespace")
-	if ns == "" {
-		ns = "default"
-	}
+	ns = orDefault(ns)
 	switch args[0] {
 	case "node", "nodes", "no":
 		nodes, err := c.GetNodes()
 		if err != nil {
 			return noFiles()
 		}
-		out := make([]string, 0, len(nodes))
-		for _, n := range nodes {
-			out = append(out, n.Name)
-		}
-		return out, cobra.ShellCompDirectiveNoFileComp
+		return lo.Map(nodes, func(n Node, _ int) string { return n.Name }), cobra.ShellCompDirectiveNoFileComp
 	case "vm", "vms", "virtualmachine", "virtualmachines":
 		vms, err := c.GetVirtualMachines()
 		if err != nil {
 			return noFiles()
 		}
-		out := make([]string, 0, len(vms))
-		for _, vm := range vms {
-			vmns := vm.Namespace
-			if vmns == "" {
-				vmns = "default"
-			}
-			if vmns == ns {
-				out = append(out, vm.Name)
-			}
-		}
-		return out, cobra.ShellCompDirectiveNoFileComp
+		return lo.Map(lo.Filter(vms, func(vm VirtualMachine, _ int) bool {
+			return orDefault(vm.Namespace) == ns
+		}), func(vm VirtualMachine, _ int) string { return vm.Name }), cobra.ShellCompDirectiveNoFileComp
 	case "flavor", "flavors", "fl":
 		flavors, err := c.GetFlavors()
 		if err != nil {
 			return noFiles()
 		}
-		out := make([]string, 0, len(flavors))
-		for _, f := range flavors {
-			out = append(out, f.Name)
-		}
-		return out, cobra.ShellCompDirectiveNoFileComp
+		return lo.Map(flavors, func(f Flavor, _ int) string { return f.Name }), cobra.ShellCompDirectiveNoFileComp
 	case "volume", "volumes", "vol", "vols":
 		volumes, err := c.GetVolumes()
 		if err != nil {
 			return noFiles()
 		}
-		out := make([]string, 0, len(volumes))
-		for _, v := range volumes {
-			vns := v.Namespace
-			if vns == "" {
-				vns = "default"
-			}
-			if vns == ns {
-				out = append(out, v.Name)
-			}
-		}
+		out := lo.Map(lo.Filter(volumes, func(v Volume, _ int) bool {
+			return orDefault(v.Namespace) == ns
+		}), func(v Volume, _ int) string { return v.Name })
 		return out, cobra.ShellCompDirectiveNoFileComp
 	default:
 		return noFiles()
@@ -117,24 +93,15 @@ func init() {
 	vmThenVolume := func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		c := NewClient(apiURL(cmd))
 		ns, _ := cmd.Flags().GetString("namespace")
-		if ns == "" {
-			ns = "default"
-		}
+		ns = orDefault(ns)
 		if len(args) == 0 {
 			vms, err := c.GetVirtualMachines()
 			if err != nil {
 				return noFiles()
 			}
-			var out []string
-			for _, vm := range vms {
-				vmns := vm.Namespace
-				if vmns == "" {
-					vmns = "default"
-				}
-				if vmns == ns {
-					out = append(out, vm.Name)
-				}
-			}
+			out := lo.Map(lo.Filter(vms, func(vm VirtualMachine, _ int) bool {
+				return orDefault(vm.Namespace) == ns
+			}), func(vm VirtualMachine, _ int) string { return vm.Name })
 			return out, cobra.ShellCompDirectiveNoFileComp
 		}
 		if len(args) == 1 {
@@ -142,16 +109,9 @@ func init() {
 			if err != nil {
 				return noFiles()
 			}
-			var out []string
-			for _, v := range volumes {
-				vns := v.Namespace
-				if vns == "" {
-					vns = "default"
-				}
-				if vns == ns {
-					out = append(out, v.Name)
-				}
-			}
+			out := lo.Map(lo.Filter(volumes, func(v Volume, _ int) bool {
+				return orDefault(v.Namespace) == ns
+			}), func(v Volume, _ int) string { return v.Name })
 			return out, cobra.ShellCompDirectiveNoFileComp
 		}
 		return noFiles()

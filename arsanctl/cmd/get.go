@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 )
 
@@ -82,29 +83,16 @@ func filterVMs(vms []VirtualMachine, ns string, all bool) []VirtualMachine {
 	if all {
 		return vms
 	}
-	if ns == "" {
-		ns = "default"
-	}
-	out := vms[:0:0]
-	for _, vm := range vms {
-		vmns := vm.Namespace
-		if vmns == "" {
-			vmns = "default"
-		}
-		if vmns == ns {
-			out = append(out, vm)
-		}
-	}
-	return out
+	ns = orDefault(ns)
+	return lo.Filter(vms, func(vm VirtualMachine, _ int) bool {
+		return orDefault(vm.Namespace) == ns
+	})
 }
 
 func printVolumes(volumes []Volume) {
 	fmt.Printf("%-16s %-16s %-10s %-8s %-10s %s\n", "NAMESPACE", "NAME", "SIZE", "STATE", "ATTACHED", "IMAGE")
 	for _, v := range volumes {
 		attached := dash(v.AttachedTo)
-		if v.AttachedTo != "" {
-			attached = v.AttachedTo
-		}
 		fmt.Printf("%-16s %-16s %-10s %-8s %-10s %s\n",
 			v.Namespace, v.Name, mibShort(v.SizeMiB), v.State, attached, dash(v.Image))
 	}
@@ -115,20 +103,10 @@ func filterVolumes(volumes []Volume, ns string, all bool) []Volume {
 	if all {
 		return volumes
 	}
-	if ns == "" {
-		ns = "default"
-	}
-	out := volumes[:0:0]
-	for _, v := range volumes {
-		vns := v.Namespace
-		if vns == "" {
-			vns = "default"
-		}
-		if vns == ns {
-			out = append(out, v)
-		}
-	}
-	return out
+	ns = orDefault(ns)
+	return lo.Filter(volumes, func(v Volume, _ int) bool {
+		return orDefault(v.Namespace) == ns
+	})
 }
 
 func printFlavors(flavors []Flavor) {

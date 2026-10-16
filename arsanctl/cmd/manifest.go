@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/samber/lo"
 	"gopkg.in/yaml.v3"
 )
 
@@ -108,10 +109,13 @@ func loadManifests(path string) ([]manifest, error) {
 
 // manifestNamespace defaults an empty metadata.namespace, kubectl-style.
 func manifestNamespace(m manifest) string {
-	if m.Metadata.Namespace == "" {
-		return "default"
-	}
-	return m.Metadata.Namespace
+	return lo.Ternary(m.Metadata.Namespace == "", "default", m.Metadata.Namespace)
+}
+
+// orDefault treats an empty namespace as "default", covering rows written
+// before namespaces existed so an upgrade does not duplicate them.
+func orDefault(ns string) string {
+	return lo.Ternary(ns == "", "default", ns)
 }
 
 // findVolume resolves a volume id or name within a namespace, mirroring
@@ -121,23 +125,14 @@ func (c *Client) findVolume(namespace, nameOrID string) (Volume, error) {
 	if err != nil {
 		return Volume{}, err
 	}
-	for _, v := range volumes {
-		if v.ID == nameOrID {
-			return v, nil
-		}
+	if v, ok := lo.Find(volumes, func(v Volume) bool { return v.ID == nameOrID }); ok {
+		return v, nil
 	}
-	ns := namespace
-	if ns == "" {
-		ns = "default"
-	}
-	for _, v := range volumes {
-		vns := v.Namespace
-		if vns == "" {
-			vns = "default"
-		}
-		if vns == ns && v.Name == nameOrID {
-			return v, nil
-		}
+	ns := orDefault(namespace)
+	if v, ok := lo.Find(volumes, func(v Volume) bool {
+		return orDefault(v.Namespace) == ns && v.Name == nameOrID
+	}); ok {
+		return v, nil
 	}
 	return Volume{}, fmt.Errorf("volume %q not found in namespace %q", nameOrID, ns)
 }
@@ -150,23 +145,16 @@ func (c *Client) findVM(namespace, nameOrID string) (VirtualMachine, error) {
 	if err != nil {
 		return VirtualMachine{}, err
 	}
-	for _, vm := range vms {
-		if vm.ID == nameOrID {
-			return vm, nil
-		}
+	if vm, ok := lo.Find(vms, func(vm VirtualMachine) bool { return vm.ID == nameOrID }); ok {
+		return vm, nil
 	}
-	for _, vm := range vms {
-		// Rows written before namespaces existed carry "": they read as
-		// the default namespace so an upgrade does not duplicate them.
-		ns := vm.Namespace
-		if ns == "" {
-			ns = "default"
-		}
-		if ns == namespace && vm.Name == nameOrID {
-			return vm, nil
-		}
+	ns := orDefault(namespace)
+	if vm, ok := lo.Find(vms, func(vm VirtualMachine) bool {
+		return orDefault(vm.Namespace) == ns && vm.Name == nameOrID
+	}); ok {
+		return vm, nil
 	}
-	return VirtualMachine{}, fmt.Errorf("virtualmachine %q not found in namespace %q", nameOrID, namespace)
+	return VirtualMachine{}, fmt.Errorf("virtualmachine %q not found in namespace %q", nameOrID, ns)
 }
 
 // sameSpec reports whether the live VM already matches the manifest, so apply

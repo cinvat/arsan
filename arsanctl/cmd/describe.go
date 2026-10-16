@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 )
 
@@ -61,10 +62,8 @@ func (c *Client) findNode(idOrName string) (Node, error) {
 	if err != nil {
 		return Node{}, err
 	}
-	for _, n := range nodes {
-		if n.ID == idOrName || n.Name == idOrName {
-			return n, nil
-		}
+	if n, ok := lo.Find(nodes, func(n Node) bool { return n.ID == idOrName || n.Name == idOrName }); ok {
+		return n, nil
 	}
 	return Node{}, fmt.Errorf("node %q not found", idOrName)
 }
@@ -74,10 +73,8 @@ func (c *Client) findFlavor(name string) (Flavor, error) {
 	if err != nil {
 		return Flavor{}, err
 	}
-	for _, f := range flavors {
-		if f.Name == name {
-			return f, nil
-		}
+	if f, ok := lo.Find(flavors, func(f Flavor) bool { return f.Name == name }); ok {
+		return f, nil
 	}
 	return Flavor{}, fmt.Errorf("flavor %q not found", name)
 }
@@ -191,10 +188,7 @@ func vcpuLong(v VCPU) string {
 }
 
 func dash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
+	return lo.Ternary(s == "", "-", s)
 }
 
 func init() {
