@@ -1,8 +1,0 @@
-apiVersion: v1alpha1
-kind: VirtualMachine
-metadata:
-  name: cirros1
-  namespace: default
-spec:
-  image: /etc/arsan/images/cirros.img
-  flavorRef: m1.small
