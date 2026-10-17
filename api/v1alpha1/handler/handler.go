@@ -50,6 +50,17 @@ func (h *Handler) ListNodes(c *gin.Context) {
 	c.JSON(http.StatusOK, nodes)
 }
 
+// GetNode returns one node. Discovery advertises `get` for nodes, so the verb
+// has to exist: an advertised verb with no route is a broken promise.
+func (h *Handler) GetNode(c *gin.Context) {
+	n, err := h.nodes.Get(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, n)
+}
+
 // ----------------------------------------------------------------- servers
 
 func (h *Handler) CreateVirtualMachine(c *gin.Context) {

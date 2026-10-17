@@ -42,6 +42,11 @@ func Register(r *gin.Engine, cfg Config) {
 
 	g := r.Group(APIVersion)
 
+	// Discovery. GET /v1alpha1 is the APIResourceList an aggregation origin
+	// (kloudapi) fetches to learn this version's kinds; it is the group
+	// version itself, not a subresource.
+	g.GET("", handler.Discovery)
+
 	g.GET("/health", handler.Health)
 
 	// Nodes. An agent registers itself here with the bootstrap token and is
@@ -49,6 +54,7 @@ func Register(r *gin.Engine, cfg Config) {
 	// that creates a node.
 	g.POST("/nodes", bootstrap.RegisterNode)
 	g.GET("/nodes", h.ListNodes)
+	g.GET("/nodes/:id", h.GetNode)
 	g.POST("/nodes/:id/usage", h.RecordUsage)
 
 	// VirtualMachines. CRUD only: create persists PENDING and publishes a command,
