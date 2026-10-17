@@ -549,6 +549,41 @@ That last row matters: publishing a command that never reached the bus is not a
 `202`. Reporting success for work nobody was asked to do is the failure mode a
 queue introduces, and it has to be named.
 
+### Sitting behind an aggregation origin (kloudapi)
+
+arsan can be fronted by `kloudapi`, an aggregation origin that serves discovery
+and proxies to the services behind it. That costs arsan two things and adds no
+new state.
+
+**Discovery.** The version serves its own `APIResourceList` at the groupVersion
+path, `GET /v1alpha1`, listing the kinds it routes (`Node`, `Flavor`,
+`VirtualMachine`, `Volume`) with their plural name, singular name, namespacing
+and supported verbs. The list is a package variable beside the route table in
+`v1alpha1.go`, so a route and its discovery entry are one edit apart and cannot
+drift. The origin fetches it once at startup and folds it into `/apis`; routing
+never keys on `kind`, only on the path prefix, so this document tells clients
+where a kind lives without teaching the origin anything about it.
+
+**Honest verbs.** Because discovery advertises `get` for nodes, the verb has to
+exist: `GET /v1alpha1/nodes/{id}` is mounted. An advertised verb with no route
+is a broken promise, and the fix belongs here rather than in a caveat.
+
+Nothing else changes. The shapes the origin and its CLI read are the ones arsan
+already returns, which is why no field was renamed to satisfy it:
+
+- lists are JSON arrays; `watch=true` is level-triggered NDJSON keyed by the
+  collection name (`{"nodes":[...]}`, `{"virtualmachines":[...]}`), flushed per
+  snapshot — both already true;
+- records serialize under Go field names, which is exactly the conventional
+  set a client expects (`ID`, `Name`, `Namespace`, `State`, `NodeID`, and so
+  on);
+- `Node`, `Flavor` and the non-namespaced kinds carry no `Namespace`;
+  `Volume` and `VirtualMachine` do.
+
+The origin holds the *group's own* answer, never an invented one, so there is
+no second schema to keep in sync: the day a kind gains a route, its discovery
+entry lands in the same commit.
+
 ---
 
 ## 4. Subcommand independence

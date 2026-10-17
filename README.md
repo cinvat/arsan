@@ -15,6 +15,11 @@ controller consumes → schedule (filter → weigh → claim) → NATS request �
 - **controller** — consumes NATS commands, probes agents, places VMs. No HTTP, no engine of its own.
 - **agent** — runs on each compute node. Owns the real engine (`fake`, `kvm`). Bootstraps over REST with only a token, answers on the bus.
 
+The api can sit behind `kloudapi`, an aggregation origin that fronts versioned
+services behind one address. To be discoverable there it serves an
+`APIResourceList` at `GET /v1alpha1` naming its kinds; see
+[docs/business-logics.md](docs/business-logics.md) §3.
+
 Terms follow Kubernetes: a **Node** is the machine (identity defaults to hostname), an **Agent** is the process on it, an **Engine** is what creates VMs.
 
 ## Quickstart

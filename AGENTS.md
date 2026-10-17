@@ -184,6 +184,10 @@ its own path group, so v1alpha1 is served at `/v1alpha1/...`.
   `api/api.go`. Never edit `v1alpha1` to change its shape.
 - Handlers depend on the `core` interfaces, never on a concrete service.
 - `internal/api/` does not exist. Do not create it; it duplicates `api/`.
+- Each version serves an `APIResourceList` at its **groupVersion path**
+  (`GET /v1alpha1`) so an aggregation origin can discover its kinds. Add a
+  route and its entry there in the same change; a listed verb with no route is
+  a broken promise.
 
 ## Build & Test
 
