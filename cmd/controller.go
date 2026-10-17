@@ -75,6 +75,8 @@ func subscribe(ctx context.Context, c *app.Controller, log app.Logger) error {
 		{bus.TopicInstanceDelete, onInstanceDelete(c, log)},
 		{bus.TopicInstanceStart, onInstanceStart(c, log)},
 		{bus.TopicInstanceStop, onInstanceStop(c, log)},
+		{bus.TopicInstanceUpdate, onInstanceUpdate(c, log)},
+		{bus.TopicInstanceReboot, onInstanceReboot(c, log)},
 		{bus.TopicInstanceMigrate, onInstanceMigrate(c, log)},
 		{bus.TopicInstanceAttachVolume, onInstanceAttachVolume(c, log)},
 		{bus.TopicInstanceDetachVolume, onInstanceDetachVolume(c, log)},
@@ -197,6 +199,33 @@ func onInstanceStop(c *app.Controller, log app.Logger) func(context.Context, bus
 		if err := c.Compute.Stop(ctx, cmd.Target); err != nil {
 			log.Error("stop failed", "instance", cmd.Target, "err", err)
 			return invalidIsParked(log, "stop", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+// onInstanceUpdate applies a resize the api has recorded. The payload is the
+// concrete target flavor; a bad payload is dropped rather than spun on.
+func onInstanceUpdate(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		var flavor core.Flavor
+		if err := json.Unmarshal(cmd.Payload, &flavor); err != nil {
+			log.Error("update dropped: bad payload", "instance", cmd.Target, "err", err)
+			return nil
+		}
+		if err := c.Compute.Update(ctx, cmd.Target, flavor); err != nil {
+			log.Error("update failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "update", cmd.Target, err)
+		}
+		return nil
+	}
+}
+
+func onInstanceReboot(c *app.Controller, log app.Logger) func(context.Context, bus.Command) error {
+	return func(ctx context.Context, cmd bus.Command) error {
+		if err := c.Compute.Reboot(ctx, cmd.Target); err != nil {
+			log.Error("reboot failed", "instance", cmd.Target, "err", err)
+			return invalidIsParked(log, "reboot", cmd.Target, err)
 		}
 		return nil
 	}

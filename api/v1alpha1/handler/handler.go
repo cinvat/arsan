@@ -2,12 +2,17 @@
 //
 // Handlers parse, call a service, and render JSON. They hold no domain logic
 // and no state, and they map core sentinel errors onto status codes.
+//
+// They speak the kloudapi object contract (apiVersion/kind/metadata/spec/
+// status): the wire shape is the envelope, while the services underneath work
+// in arsan's core types. The conversion lives in object; handlers only call it.
 package handler
 
 import (
 	"errors"
 	"net/http"
 
+	"github.com/cinvat/arsan/api/v1alpha1/object"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
@@ -47,7 +52,8 @@ func (h *Handler) ListNodes(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, nodes)
+	out := lo.Map(nodes, func(n core.Node, _ int) object.Node { return object.NewNode(n) })
+	c.JSON(http.StatusOK, out)
 }
 
 // GetNode returns one node. Discovery advertises `get` for nodes, so the verb
@@ -58,17 +64,18 @@ func (h *Handler) GetNode(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, n)
+	c.JSON(http.StatusOK, object.NewNode(n))
 }
 
 // ----------------------------------------------------------------- servers
 
 func (h *Handler) CreateVirtualMachine(c *gin.Context) {
-	var req core.CreateInstanceRequest
-	if !bind(c, &req) {
+	var obj object.VirtualMachine
+	if !bind(c, &obj) {
 		return
 	}
-	if req.Name == "" || req.ImageRef == "" {
+	req := obj.ToCreateRequest()
+	if req.Name == "" || (req.ImageRef == "" && len(req.Volumes) == 0) {
 		writeErr(c, core.ErrInvalidRequest)
 		return
 	}
@@ -79,8 +86,8 @@ func (h *Handler) CreateVirtualMachine(c *gin.Context) {
 		return
 	}
 	// Accepted, not Created: the build is asynchronous. Clients poll
-	// GET /servers/{id} until the state settles.
-	c.JSON(http.StatusAccepted, inst)
+	// GET the virtualmachine until the state settles.
+	c.JSON(http.StatusAccepted, object.NewVirtualMachine(inst))
 }
 
 func (h *Handler) ListVirtualMachines(c *gin.Context) {
@@ -96,7 +103,8 @@ func (h *Handler) ListVirtualMachines(c *gin.Context) {
 	if state := c.Query("state"); state != "" {
 		insts = filterByState(insts, state)
 	}
-	c.JSON(http.StatusOK, insts)
+	out := lo.Map(insts, func(i core.Instance, _ int) object.VirtualMachine { return object.NewVirtualMachine(i) })
+	c.JSON(http.StatusOK, out)
 }
 
 func (h *Handler) GetVirtualMachine(c *gin.Context) {
@@ -105,7 +113,7 @@ func (h *Handler) GetVirtualMachine(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, inst)
+	c.JSON(http.StatusOK, object.NewVirtualMachine(inst))
 }
 
 func (h *Handler) DeleteVirtualMachine(c *gin.Context) {
@@ -130,6 +138,42 @@ func (h *Handler) StopVirtualMachine(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "stopped"})
+}
+
+// PatchVirtualMachine applies a merge patch to a VM's mutable options and
+// returns the object as the client asked for it. Today that is a resize
+// (spec.flavor or spec.flavorRef); anything immutable is refused by the
+// service, not silently ignored.
+func (h *Handler) PatchVirtualMachine(c *gin.Context) {
+	id := c.Param("id")
+	inst, err := h.instances.Get(c.Request.Context(), id)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	patched, ok := patchedObject(c, object.NewVirtualMachine(inst))
+	if !ok {
+		return
+	}
+	req := core.UpdateInstanceRequest{FlavorRef: patched.Spec.FlavorRef}
+	if patched.Spec.Flavor != nil {
+		req.Flavor = &core.Flavor{VCPU: patched.Spec.Flavor.VCPU, RAM: patched.Spec.Flavor.Memory.MiB()}
+	}
+	if err := h.instances.Update(c.Request.Context(), id, req); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, patched)
+}
+
+// RebootVirtualMachine restarts a running guest: a subresource action, not a
+// spec change, so it is addressed as <vm>/reboot.
+func (h *Handler) RebootVirtualMachine(c *gin.Context) {
+	if err := h.instances.Reboot(c.Request.Context(), c.Param("id")); err != nil {
+		writeErr(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{"status": "rebooting"})
 }
 
 // AttachVolume enqueues attaching a prepared volume, optionally taking the
@@ -174,16 +218,16 @@ func (h *Handler) SetBootVolume(c *gin.Context) {
 }
 
 func (h *Handler) CreateVolume(c *gin.Context) {
-	var req core.CreateVolumeRequest
-	if !bind(c, &req) {
+	var obj object.Volume
+	if !bind(c, &obj) {
 		return
 	}
-	v, err := h.volumes.Create(c.Request.Context(), req)
+	v, err := h.volumes.Create(c.Request.Context(), obj.ToCreateRequest())
 	if err != nil {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, v)
+	c.JSON(http.StatusCreated, object.NewVolume(v))
 }
 
 func (h *Handler) ListVolumes(c *gin.Context) {
@@ -192,10 +236,8 @@ func (h *Handler) ListVolumes(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	if vs == nil {
-		vs = []core.Volume{}
-	}
-	c.JSON(http.StatusOK, vs)
+	out := lo.Map(vs, func(v core.Volume, _ int) object.Volume { return object.NewVolume(v) })
+	c.JSON(http.StatusOK, out)
 }
 
 func (h *Handler) GetVolume(c *gin.Context) {
@@ -204,7 +246,7 @@ func (h *Handler) GetVolume(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, v)
+	c.JSON(http.StatusOK, object.NewVolume(v))
 }
 
 func (h *Handler) DeleteVolume(c *gin.Context) {
@@ -215,11 +257,20 @@ func (h *Handler) DeleteVolume(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+// PatchVolume refuses every patch: a volume's size and image are fixed at
+// create and boot order moves through the VM's set-boot subresource, so there
+// is no mutable field a merge patch could legitimately change.
+func (h *Handler) PatchVolume(c *gin.Context) {
+	c.JSON(http.StatusUnprocessableEntity, errBody("immutable",
+		errors.New("volume spec is immutable; boot order moves via the VM's set-boot subresource")))
+}
+
 func (h *Handler) CreateFlavor(c *gin.Context) {
-	var req core.CreateFlavorRequest
-	if !bind(c, &req) {
+	var obj object.Flavor
+	if !bind(c, &obj) {
 		return
 	}
+	req := obj.ToCreateRequest()
 	if req.Name == "" {
 		writeErr(c, core.ErrInvalidRequest)
 		return
@@ -229,18 +280,16 @@ func (h *Handler) CreateFlavor(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, f)
+	c.JSON(http.StatusCreated, object.NewFlavor(f))
 }
 
 func (h *Handler) ListFlavors(c *gin.Context) {
-	out, err := h.flavors.List(c.Request.Context())
+	fs, err := h.flavors.List(c.Request.Context())
 	if err != nil {
 		writeErr(c, err)
 		return
 	}
-	if out == nil {
-		out = []core.Flavor{}
-	}
+	out := lo.Map(fs, func(f core.Flavor, _ int) object.Flavor { return object.NewFlavor(f) })
 	c.JSON(http.StatusOK, out)
 }
 
@@ -250,7 +299,7 @@ func (h *Handler) GetFlavor(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, f)
+	c.JSON(http.StatusOK, object.NewFlavor(f))
 }
 
 func (h *Handler) DeleteFlavor(c *gin.Context) {
@@ -259,6 +308,13 @@ func (h *Handler) DeleteFlavor(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// PatchFlavor refuses every patch: flavors are immutable by design, so a
+// resize is a new flavor, never an edit.
+func (h *Handler) PatchFlavor(c *gin.Context) {
+	c.JSON(http.StatusUnprocessableEntity, errBody("immutable",
+		errors.New("flavors are immutable; create a new flavor and resize the VM onto it")))
 }
 
 // ----------------------------------------------------------------- helpers

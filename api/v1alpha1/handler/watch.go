@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/cinvat/arsan/api/v1alpha1/object"
 	"github.com/cinvat/arsan/internal/core"
 )
 
@@ -39,10 +40,11 @@ func (h *Handler) WatchVirtualMachines(c *gin.Context) {
 		if state != "" {
 			insts = filterByState(insts, state)
 		}
-		if insts == nil {
-			insts = []core.Instance{}
+		objs := make([]object.VirtualMachine, 0, len(insts))
+		for _, i := range insts {
+			objs = append(objs, object.NewVirtualMachine(i))
 		}
-		raw, err := json.Marshal(map[string]any{"virtualmachines": insts})
+		raw, err := json.Marshal(map[string]any{"virtualmachines": objs})
 		if err != nil {
 			return true
 		}
@@ -100,7 +102,11 @@ func (h *Handler) WatchNodes(c *gin.Context) {
 		if nodes == nil {
 			nodes = []core.Node{}
 		}
-		raw, err := json.Marshal(map[string]any{"nodes": nodes})
+		objs := make([]object.Node, 0, len(nodes))
+		for _, n := range nodes {
+			objs = append(objs, object.NewNode(n))
+		}
+		raw, err := json.Marshal(map[string]any{"nodes": objs})
 		if err != nil {
 			return true
 		}

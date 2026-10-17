@@ -156,6 +156,87 @@ func (s *Service) Stop(ctx context.Context, id string) error {
 	return err
 }
 
+// Update applies a mutable option — today a flavor resize. The guest must be
+// defined with the new sizing, and libvirt only redefines a stopped domain, so
+// a running VM is stopped, redefined and started again: a resize is a reboot.
+//
+// Pending instances are updated in place: nothing is placed yet, so the build
+// that follows simply uses the new flavor.
+func (s *Service) Update(ctx context.Context, id string, flavor core.Flavor) error {
+	inst, err := s.cfg.Instances.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	switch inst.State {
+	case core.StatePending, core.StateRunning, core.StateShutoff:
+	default:
+		return fmt.Errorf("update in state %s: %w", inst.State, core.ErrInvalidTransition)
+	}
+	if inst.Flavor.VCPU.Dedicated != flavor.VCPU.Dedicated {
+		return fmt.Errorf("resize across dedicated/shared: %w", core.ErrInvalidRequest)
+	}
+	if inst.Flavor.VCPU == flavor.VCPU && inst.Flavor.RAM == flavor.RAM {
+		return nil // already the requested shape; no redefine, no reboot
+	}
+
+	wasRunning := inst.State == core.StateRunning
+	if wasRunning {
+		if err := s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
+			return d.Stop(dctx, id)
+		}); err != nil {
+			return err
+		}
+		if _, err := s.cfg.Instances.Transition(ctx, id, core.StateRunning, core.StateShutoff); err != nil {
+			return err
+		}
+		inst.State = core.StateShutoff
+	}
+
+	inst.Flavor = flavor
+	updated, err := s.cfg.Instances.Update(ctx, inst)
+	if err != nil {
+		return err
+	}
+	if updated.NodeID != "" {
+		req, rerr := s.createRequestOf(ctx, updated)
+		if rerr != nil {
+			return rerr
+		}
+		if err := s.withEngine(ctx, updated.NodeID, func(dctx context.Context, d core.Driver) error {
+			return d.UpdateVolumes(dctx, req) // redefine the whole domain, new flavor included
+		}); err != nil {
+			return err
+		}
+	}
+
+	if wasRunning {
+		if err := s.withEngine(ctx, updated.NodeID, func(dctx context.Context, d core.Driver) error {
+			return d.Start(dctx, id)
+		}); err != nil {
+			return err
+		}
+		if _, err := s.cfg.Instances.Transition(ctx, id, core.StateShutoff, core.StateRunning); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Reboot restarts a running guest, keeping its definition, disks and
+// placement. It is a lifecycle action, not a spec change.
+func (s *Service) Reboot(ctx context.Context, id string) error {
+	inst, err := s.cfg.Instances.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if inst.State != core.StateRunning {
+		return fmt.Errorf("reboot in state %s: %w", inst.State, core.ErrInvalidTransition)
+	}
+	return s.withEngine(ctx, inst.NodeID, func(dctx context.Context, d core.Driver) error {
+		return d.Reboot(dctx, id)
+	})
+}
+
 // volumeRows resolves an instance's attachments to their volume rows. A
 // missing row is a hard error: the attachment names storage that no longer
 // exists, and guessing would boot the wrong disk.

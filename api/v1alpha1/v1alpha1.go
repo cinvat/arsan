@@ -62,24 +62,30 @@ func Register(r *gin.Engine, cfg Config) {
 	g.POST("/virtualmachines", h.CreateVirtualMachine)
 	g.GET("/virtualmachines", h.ListVirtualMachines)
 	g.GET("/virtualmachines/:id", h.GetVirtualMachine)
+	g.PATCH("/virtualmachines/:id", h.PatchVirtualMachine)
 	g.DELETE("/virtualmachines/:id", h.DeleteVirtualMachine)
 	g.POST("/virtualmachines/:id/start", h.StartVirtualMachine)
 	g.POST("/virtualmachines/:id/stop", h.StopVirtualMachine)
+	g.POST("/virtualmachines/:id/reboot", h.RebootVirtualMachine)
 	g.POST("/virtualmachines/:id/volumes", h.AttachVolume)
 	g.DELETE("/virtualmachines/:id/volumes/:volumeId", h.DetachVolume)
 	g.POST("/virtualmachines/:id/boot", h.SetBootVolume)
 
 	// Volumes. Named, independent block devices: create from a base, blank,
 	// or an iso; attach by id; delete removes the record (and the file only
-	// when DeleteOnTermination said so).
+	// when DeleteOnTermination said so). Patch is mounted and refused: the
+	// spec is immutable, so kubectl-style clients get a clear 422 rather
+	// than a 405 "no such verb".
 	g.POST("/volumes", h.CreateVolume)
 	g.GET("/volumes", h.ListVolumes)
 	g.GET("/volumes/:id", h.GetVolume)
+	g.PATCH("/volumes/:id", h.PatchVolume)
 	g.DELETE("/volumes/:id", h.DeleteVolume)
 
 	// Flavors. Named, immutable sizing referenced by flavor_ref at VM create.
 	g.POST("/flavors", h.CreateFlavor)
 	g.GET("/flavors", h.ListFlavors)
 	g.GET("/flavors/:name", h.GetFlavor)
+	g.PATCH("/flavors/:name", h.PatchFlavor)
 	g.DELETE("/flavors/:name", h.DeleteFlavor)
 }

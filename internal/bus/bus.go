@@ -110,6 +110,8 @@ const (
 	TopicInstanceDelete  = "instance.delete"
 	TopicInstanceStart   = "instance.start"
 	TopicInstanceStop    = "instance.stop"
+	TopicInstanceUpdate  = "instance.update"
+	TopicInstanceReboot  = "instance.reboot"
 	TopicInstanceMigrate = "instance.migrate"
 	// Storage commands converge one VM's volumes to its record: attach and
 	// detach work live on a running guest, boot moves need it stopped.

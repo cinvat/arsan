@@ -221,11 +221,26 @@ type FlavorService interface {
 	Delete(ctx context.Context, name string) error
 }
 
+// UpdateInstanceRequest carries the mutable options a patch may change on a
+// running VM. Today that is the flavor: a resize, applied by redefining the
+// domain on the engine, which restarts the guest. Exactly one of FlavorRef
+// (a stored flavor) or Flavor (inline) is set.
+type UpdateInstanceRequest struct {
+	FlavorRef string
+	Flavor    *Flavor
+}
+
 type InstanceService interface {
 	Create(ctx context.Context, req CreateInstanceRequest) (Instance, error)
 	Get(ctx context.Context, id string) (Instance, error)
 	List(ctx context.Context) ([]Instance, error)
 	Delete(ctx context.Context, id string) error
+	// Update applies mutable options (a resize). It is asynchronous like the
+	// other lifecycle verbs: the api records the wish and the controller
+	// redefines the domain.
+	Update(ctx context.Context, id string, req UpdateInstanceRequest) error
+	// Reboot restarts a running guest, keeping its definition and disks.
+	Reboot(ctx context.Context, id string) error
 	Start(ctx context.Context, id string) error
 	Stop(ctx context.Context, id string) error
 	Migrate(ctx context.Context, id, targetNodeID string) error

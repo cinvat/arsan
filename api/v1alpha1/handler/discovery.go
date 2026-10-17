@@ -43,7 +43,7 @@ var resources = []APIResource{
 	{Name: "flavors", SingularName: "flavor", Namespaced: false, Kind: "Flavor",
 		Verbs: []string{"get", "list", "create", "delete"}},
 	{Name: "virtualmachines", SingularName: "virtualmachine", Namespaced: true, Kind: "VirtualMachine",
-		Verbs: []string{"get", "list", "watch", "create", "delete"}},
+		Verbs: []string{"get", "list", "watch", "create", "patch", "delete"}},
 	{Name: "volumes", SingularName: "volume", Namespaced: true, Kind: "Volume",
 		Verbs: []string{"get", "list", "create", "delete"}},
 }

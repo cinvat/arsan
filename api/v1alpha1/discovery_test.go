@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/cinvat/arsan/api/v1alpha1/object"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/cinvat/arsan/internal/records"
 	"github.com/cinvat/arsan/internal/store/memory"
@@ -83,11 +84,11 @@ func TestGetNodeIsRouted(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /v1alpha1/nodes/%s = %d, want 200", n.ID, rec.Code)
 	}
-	var got core.Node
+	var got object.Node
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode node: %v", err)
 	}
-	if got.ID != n.ID {
-		t.Fatalf("node id = %q, want %q", got.ID, n.ID)
+	if got.Status.ID != n.ID {
+		t.Fatalf("node id = %q, want %q", got.Status.ID, n.ID)
 	}
 }

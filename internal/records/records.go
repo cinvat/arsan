@@ -378,6 +378,49 @@ func (s *Instances) Stop(ctx context.Context, id string) error {
 	return s.command(ctx, bus.TopicInstanceStop, id)
 }
 
+// Update resolves and validates a mutable-options change, then publishes it.
+// The api decides nothing about whether the change is legal for the current
+// state: the controller's compare-and-swap does, exactly as for start and stop.
+//
+// FlavorRef is resolved here (this layer holds the flavor store) so the
+// command carries a concrete flavor, not a name the controller must look up.
+func (s *Instances) Update(ctx context.Context, id string, req core.UpdateInstanceRequest) error {
+	var flavor core.Flavor
+	switch {
+	case req.FlavorRef != "":
+		if s.Flavors == nil {
+			return fmt.Errorf("flavor_ref %q: flavor store not configured: %w", req.FlavorRef, core.ErrInvalidRequest)
+		}
+		f, err := s.Flavors.GetFlavor(ctx, req.FlavorRef)
+		if err != nil {
+			return err
+		}
+		flavor = f
+	case req.Flavor != nil:
+		flavor = *req.Flavor
+	default:
+		return fmt.Errorf("update: nothing to change: %w", core.ErrInvalidRequest)
+	}
+	if err := flavor.VCPU.Validate(); err != nil {
+		return err
+	}
+	if flavor.RAM <= 0 {
+		return fmt.Errorf("flavor must have positive ram: %w", core.ErrInvalidRequest)
+	}
+	payload, err := json.Marshal(flavor)
+	if err != nil {
+		return err
+	}
+	return s.publish(ctx, bus.TopicInstanceUpdate, id, payload)
+}
+
+// Reboot restarts a running guest. Like every other lifecycle verb it is a
+// wish recorded on the bus; the controller checks the state and the engine
+// does the work.
+func (s *Instances) Reboot(ctx context.Context, id string) error {
+	return s.command(ctx, bus.TopicInstanceReboot, id)
+}
+
 // AttachVolume enqueues an attach of a prepared volume, optionally taking
 // the boot position. DetachVolume frees it back to available storage; only
 // VM delete with DeleteOnTermination removes files.
