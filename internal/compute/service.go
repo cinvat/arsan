@@ -566,6 +566,11 @@ func (s *Service) fail(ctx context.Context, id string, from core.InstanceState, 
 	if err != nil {
 		return fmt.Errorf("mark error: %w", err)
 	}
+	inst.FailureReason = cause.Error()
+	inst.PendingReason = ""
+	if _, uerr := s.cfg.Instances.Update(ctx, inst); uerr != nil {
+		s.cfg.Log.Warn("record failure reason", "instance", id, "err", uerr)
+	}
 	// Free what the placement claimed: volumes first so a retry starts
 	// unattached, then the node counts. Inline-created volumes stay on disk
 	// as reusable available rows rather than leaking attached.

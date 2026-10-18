@@ -80,7 +80,6 @@ func domainXML(name string, req core.CreateRequest, files, bases map[string]stri
 %s  %s
   <os>
     <type arch='x86_64' machine='pc'>hvm</type>
-    <boot dev='hd'/>
   </os>
   <devices>
 %s
