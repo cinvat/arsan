@@ -537,7 +537,17 @@ func (s *Service) build(ctx context.Context, id string) error {
 			return err
 		}
 		vncPort = info.VNCPort
-		return d.Start(dctx, id)
+		if err := d.Start(dctx, id); err != nil {
+			return err
+		}
+		if capable, ok := d.(interface {
+			VNCPort(context.Context, string) (int, error)
+		}); ok {
+			if p, err := capable.VNCPort(dctx, id); err == nil && p > 0 {
+				vncPort = p
+			}
+		}
+		return nil
 	}); err != nil {
 		return s.fail(ctx, id, core.StateScheduling, err)
 	}

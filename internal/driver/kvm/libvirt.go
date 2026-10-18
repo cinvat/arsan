@@ -214,6 +214,33 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 	return info, nil
 }
 
+// VNCPort returns the auto-assigned VNC port for a defined domain. Libvirt
+// assigns the port when the domain starts, so callers should invoke this
+// after Start.
+func (d *Driver) VNCPort(ctx context.Context, id string) (int, error) {
+	var port int
+	err := d.do(ctx, func() error {
+		dom, err := d.lookup(id)
+		if err != nil {
+			return err
+		}
+		if dom == nil {
+			return core.ErrInstanceNotFound
+		}
+		defer dom.Free()
+		desc, err := dom.GetXMLDesc(0)
+		if err != nil {
+			return err
+		}
+		port = parseVNCPort(desc)
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return port, nil
+}
+
 // running reports whether the domain is up. A missing domain is not an error;
 // callers decide what absence means for their operation.
 func (d *Driver) running(id string) (exists, running bool, err error) {
