@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -241,18 +242,17 @@ func cdromDeviceXML(source string, bootOrder string) string {
 // parseDomainInstanceID extracts the instance id our renderer stored in
 // domain metadata. It matches our own rendering byte-for-byte, which is
 // exactly the set of domains this driver defined.
+// arsanInstanceIDRe matches the instance id whether libvirt preserved our
+// attribute order and quoting or normalised them. Attribute order and quote
+// style are not part of the contract; only the id value is.
+var arsanInstanceIDRe = regexp.MustCompile(`<arsan:instance\b[^>]*?\bid\s*=\s*['"]([^'"]+)['"]`)
+
 func parseDomainInstanceID(desc string) (string, bool) {
-	const open = `<arsan:instance xmlns:arsan='https://cinvat.github.io/arsan' id='`
-	i := strings.Index(desc, open)
-	if i < 0 {
+	m := arsanInstanceIDRe.FindStringSubmatch(desc)
+	if m == nil {
 		return "", false
 	}
-	rest := desc[i+len(open):]
-	j := strings.IndexByte(rest, '\'')
-	if j < 0 {
-		return "", false
-	}
-	return rest[:j], true
+	return m[1], true
 }
 
 // pinsMatchDesc reports whether a domain XML description carries exactly
