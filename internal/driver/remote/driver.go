@@ -147,3 +147,11 @@ func (d *Driver) Info(ctx context.Context) (engine string, total core.Resources,
 	}
 	return resp.Engine, resp.Total, nil
 }
+
+func (d *Driver) VNCPort(ctx context.Context, id string) (int, error) {
+	resp, err := d.call(ctx, agent.Request{Op: agent.OpVNC, InstanceID: id})
+	if err != nil {
+		return 0, err
+	}
+	return resp.VNCPort, nil
+}

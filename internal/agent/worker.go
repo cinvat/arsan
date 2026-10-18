@@ -28,6 +28,7 @@ const (
 	OpMigrate  Operation = "migrate"
 	OpUsage    Operation = "usage"
 	OpDomains  Operation = "domains"
+	OpVNC      Operation = "vnc"
 	// Storage ops converge one VM's volumes to the record: update on
 	// SHUTOFF, attach/detach live when the guest runs.
 	OpUpdateVolumes Operation = "update-volumes"
@@ -58,6 +59,7 @@ type Response struct {
 	Usage   core.Resources      `json:"usage,omitempty"`
 	Domains []core.DomainStatus `json:"domains,omitempty"`
 	Engine  string              `json:"engine,omitempty"`
+	VNCPort int                 `json:"vncPort,omitempty"`
 	Total   core.Resources      `json:"total,omitempty"`
 }
 
@@ -152,6 +154,17 @@ func (w *Worker) exec(ctx context.Context, req Request) (Response, error) {
 			return Response{}, err
 		}
 		return Response{Domains: domains}, nil
+	case OpVNC:
+		if capable, ok := w.driver.(interface {
+			VNCPort(context.Context, string) (int, error)
+		}); ok {
+			port, err := capable.VNCPort(ctx, req.InstanceID)
+			if err != nil {
+				return Response{}, err
+			}
+			return Response{VNCPort: port}, nil
+		}
+		return Response{}, fmt.Errorf("vnc not supported by %s", w.driver.Name())
 	case OpUpdateVolumes:
 		return Response{}, w.driver.UpdateVolumes(ctx, createRequestOf(req))
 	case OpAttachVolume:
