@@ -10,11 +10,15 @@ package handler
 
 import (
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"time"
 
 	"github.com/cinvat/arsan/api/v1alpha1/object"
 	"github.com/cinvat/arsan/internal/core"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/samber/lo"
 )
 
@@ -350,4 +354,76 @@ func writeErr(c *gin.Context, err error) {
 	default:
 		write(c, http.StatusInternalServerError, "internal", err)
 	}
+}
+
+
+var vncUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+// ConsoleVirtualMachine bridges a WebSocket to the VM's VNC port on its node,
+// so a browser (noVNC) or any WebSocket client can drive the console over
+// HTTP. The node must be reachable from the api on the reported VNC port.
+func (h *Handler) ConsoleVirtualMachine(c *gin.Context) {
+	id := c.Param("id")
+	inst, err := h.instances.Get(c.Request.Context(), id)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	if inst.VNCPort == 0 {
+		writeErr(c, fmt.Errorf("vnc not available for %s: %w", id, core.ErrInvalidRequest))
+		return
+	}
+	node, err := h.nodes.Get(c.Request.Context(), inst.NodeID)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	if node.IP == "" {
+		writeErr(c, fmt.Errorf("node %s has no address: %w", inst.NodeID, core.ErrInvalidRequest))
+		return
+	}
+
+	target := net.JoinHostPort(node.IP, fmt.Sprintf("%d", inst.VNCPort))
+	tcpConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		writeErr(c, fmt.Errorf("dial vnc %s: %w", target, err))
+		return
+	}
+
+	ws, err := vncUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		tcpConn.Close()
+		return
+	}
+
+	// ws -> tcp
+	go func() {
+		defer tcpConn.Close()
+		for {
+			_, data, err := ws.ReadMessage()
+			if err != nil {
+				return
+			}
+			if _, err := tcpConn.Write(data); err != nil {
+				return
+			}
+		}
+	}()
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := tcpConn.Read(buf)
+		if n > 0 {
+			if werr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); werr != nil {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	ws.Close()
+	tcpConn.Close()
 }
