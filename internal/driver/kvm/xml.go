@@ -94,6 +94,7 @@ func domainXML(name string, req core.CreateRequest, files, bases map[string]stri
     <console type='pty'>
       <target type='serial' port='0'/>
     </console>
+    <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
   </devices>
 </domain>
 `, name, meta, req.Flavor.RAM*1024, v.Count(), pinning, topology, storageXML(req, files, bases))
@@ -253,6 +254,22 @@ func parseDomainInstanceID(desc string) (string, bool) {
 		return "", false
 	}
 	return m[1], true
+}
+
+// parseVNCPort extracts the auto-assigned VNC port from a domain's XML.
+func parseVNCPort(desc string) int {
+	gr := regexp.MustCompile(`<graphics\b[^>]*>`).FindAllString(desc, -1)
+	for _, g := range gr {
+		if !strings.Contains(g, "vnc") {
+			continue
+		}
+		if m := regexp.MustCompile(`port=['"](\d+)['"]`).FindStringSubmatch(g); m != nil {
+			if p, err := strconv.Atoi(m[1]); err == nil {
+				return p
+			}
+		}
+	}
+	return 0
 }
 
 // pinsMatchDesc reports whether a domain XML description carries exactly

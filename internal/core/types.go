@@ -181,6 +181,8 @@ type Instance struct {
 	// PinnedCPUs holds the exclusive host CPUs for a dedicated flavor,
 	// claimed at placement and freed on teardown. Empty for shared flavors.
 	PinnedCPUs []int
+	// VNCPort is the auto-assigned VNC port for KVM guests, 0 when none.
+	VNCPort int
 	// PendingReason says why a PENDING instance is still waiting (no valid
 	// node, capacity lost, …), cleared when placement succeeds. FailureReason
 	// is the ERROR counterpart: control-plane failures live there, waiting

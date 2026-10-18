@@ -67,6 +67,7 @@ type InstanceInfo struct {
 	NodeID  string
 	Driver  string
 	Started bool
+	VNCPort int
 }
 
 // ========== Store Interfaces ==========

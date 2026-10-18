@@ -173,6 +173,7 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 	if err := d.provisionAll(ctx, req, files, bases); err != nil {
 		return core.InstanceInfo{}, err
 	}
+	var vncPort int
 	err = d.do(ctx, func() error {
 		dom, err := d.lookup(req.InstanceID)
 		if err != nil {
@@ -187,6 +188,9 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 			if current, err := pinsCurrent(dom, req); err != nil {
 				return err
 			} else if current {
+				if desc, err := dom.GetXMLDesc(0); err == nil {
+					vncPort = parseVNCPort(desc)
+				}
 				return nil
 			}
 			if err := dom.Undefine(); err != nil {
@@ -198,11 +202,15 @@ func (d *Driver) Create(ctx context.Context, req core.CreateRequest) (core.Insta
 			return err
 		}
 		defer dom.Free()
+		if desc, err := dom.GetXMLDesc(0); err == nil {
+			vncPort = parseVNCPort(desc)
+		}
 		return nil
 	})
 	if err != nil {
 		return core.InstanceInfo{}, err
 	}
+	info.VNCPort = vncPort
 	return info, nil
 }
 
@@ -342,6 +350,9 @@ func (d *Driver) UpdateVolumes(ctx context.Context, req core.CreateRequest) erro
 			return err
 		}
 		defer dom.Free()
+		if desc, err := dom.GetXMLDesc(0); err == nil {
+			vncPort = parseVNCPort(desc)
+		}
 		return nil
 	})
 }

@@ -117,6 +117,7 @@ type instanceRow struct {
 	Generation      int
 	PendingReason   string `gorm:"size:1024"`
 	FailureReason   string `gorm:"size:1024"`
+	VNCPort         int    `gorm:"column:vnc_port"`
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 }
@@ -220,6 +221,7 @@ func toInstance(r instanceRow) core.Instance {
 		Generation:    r.Generation,
 		PendingReason: r.PendingReason,
 		FailureReason: r.FailureReason,
+		VNCPort:      r.VNCPort,
 		CreatedAt:     r.CreatedAt,
 		UpdatedAt:     r.UpdatedAt,
 	}
@@ -245,6 +247,7 @@ func fromInstance(i core.Instance) instanceRow {
 		Generation:      i.Generation,
 		PendingReason:   i.PendingReason,
 		FailureReason:   i.FailureReason,
+		VNCPort:         i.VNCPort,
 		CreatedAt:       i.CreatedAt,
 		UpdatedAt:       i.UpdatedAt,
 	}

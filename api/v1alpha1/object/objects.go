@@ -247,6 +247,7 @@ type VirtualMachineStatus struct {
 	Flavor        FlavorSpec               `json:"flavor"`
 	Volumes       []VolumeAttachmentStatus `json:"volumes,omitempty"`
 	PinnedCPUs    []int                    `json:"pinnedCPUs,omitempty"`
+	VNCPort       int                      `json:"vncPort,omitempty"`
 	PendingReason string                   `json:"pendingReason,omitempty"`
 	FailureReason string                   `json:"failureReason,omitempty"`
 }
@@ -279,7 +280,7 @@ func NewVirtualMachine(i core.Instance) VirtualMachine {
 		Status: VirtualMachineStatus{
 			ID: i.ID, State: string(i.State), NodeID: i.NodeID, ImageRef: i.ImageRef,
 			Flavor:  FlavorSpec{Name: i.Flavor.Name, VCPU: i.Flavor.VCPU, Memory: core.Quantity(i.Flavor.RAM)},
-			Volumes: vols, PinnedCPUs: i.PinnedCPUs,
+			Volumes: vols, PinnedCPUs: i.PinnedCPUs, VNCPort: i.VNCPort,
 			PendingReason: i.PendingReason, FailureReason: i.FailureReason,
 		},
 	}

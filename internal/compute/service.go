@@ -530,15 +530,26 @@ func (s *Service) build(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("resolve volumes %s: %w", id, err)
 	}
+	var vncPort int
 	if err := s.withEngine(ctx, placed.NodeID, func(dctx context.Context, d core.Driver) error {
-		if _, err := d.Create(dctx, req); err != nil {
+		info, err := d.Create(dctx, req)
+		if err != nil {
 			return err
 		}
+		vncPort = info.VNCPort
 		return d.Start(dctx, id)
 	}); err != nil {
 		return s.fail(ctx, id, core.StateScheduling, err)
 	}
 
+	if vncPort != 0 {
+		if cur, err := s.cfg.Instances.Get(ctx, id); err == nil {
+			cur.VNCPort = vncPort
+			if _, err := s.cfg.Instances.Update(ctx, cur); err != nil {
+				s.cfg.Log.Warn("record vnc port", "instance", id, "err", err)
+			}
+		}
+	}
 	if _, err := s.cfg.Instances.Transition(ctx, id, core.StateScheduling, core.StateBuilding); err != nil {
 		return fmt.Errorf("enter building: %w", err)
 	}
