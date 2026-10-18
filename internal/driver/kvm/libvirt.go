@@ -350,9 +350,6 @@ func (d *Driver) UpdateVolumes(ctx context.Context, req core.CreateRequest) erro
 			return err
 		}
 		defer dom.Free()
-		if desc, err := dom.GetXMLDesc(0); err == nil {
-			vncPort = parseVNCPort(desc)
-		}
 		return nil
 	})
 }
