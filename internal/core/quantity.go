@@ -73,6 +73,10 @@ func (q *Quantity) UnmarshalJSON(raw []byte) error {
 	if err := json.Unmarshal(raw, &s); err != nil {
 		return fmt.Errorf("size %s: want <n>MB or <n>GB: %w", string(raw), ErrInvalidRequest)
 	}
+	if strings.TrimSpace(s) == "" {
+		*q = 0
+		return nil
+	}
 	v, err := ParseQuantity(s)
 	if err != nil {
 		return err
@@ -94,7 +98,16 @@ func (q *Quantity) UnmarshalYAML(unmarshal func(any) error) error {
 	}
 	s, ok := v.(string)
 	if !ok {
+		// An absent size (nil) is allowed for image/cdrom volumes.
+		if v == nil {
+			*q = 0
+			return nil
+		}
 		return fmt.Errorf("size %v: want <n>MB or <n>GB: %w", v, ErrInvalidRequest)
+	}
+	if strings.TrimSpace(s) == "" {
+		*q = 0
+		return nil
 	}
 	parsed, err := ParseQuantity(s)
 	if err != nil {

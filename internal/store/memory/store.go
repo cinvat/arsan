@@ -453,15 +453,17 @@ func (s *Store) SetNodeSpec(ctx context.Context, id string, engine string, total
 		return core.Node{}, fmt.Errorf("set spec %s: %w", id, core.ErrNodeNotFound)
 	}
 	n.Driver = engine
-	// Available is Total minus what reservations hold. The held amount
-	// survives a capacity change: a host that grew makes room, one that
-	// shrank keeps its claims (Available floors at zero, never negative).
-	held := n.Total.Sub(n.Available)
-	n.Total = total
-	n.Available = core.Resources{
-		CPU:  max(total.CPU-held.CPU, 0),
-		RAM:  max(total.RAM-held.RAM, 0),
-		Disk: max(total.Disk-held.Disk, 0),
+	// A zero total means "unknown" (the fake engine has nothing to
+	// detect): keep whatever capacity the node already carries instead of
+	// wiping it. A real engine always reports a non-zero host.
+	if total != (core.Resources{}) {
+		held := n.Total.Sub(n.Available)
+		n.Total = total
+		n.Available = core.Resources{
+			CPU:  max(total.CPU-held.CPU, 0),
+			RAM:  max(total.RAM-held.RAM, 0),
+			Disk: max(total.Disk-held.Disk, 0),
+		}
 	}
 	s.nodes[id] = n
 	return n, nil

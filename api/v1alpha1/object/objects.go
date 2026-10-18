@@ -93,11 +93,12 @@ type VolumeSource struct {
 
 // VolumeStatus is a volume's observed state.
 type VolumeStatus struct {
-	ID         string `json:"id"`
-	State      string `json:"state"`
-	SizeMiB    int    `json:"sizeMiB,omitempty"`
-	AttachedTo string `json:"attachedTo,omitempty"`
-	NodeID     string `json:"nodeId,omitempty"`
+	ID                  string `json:"id"`
+	State               string `json:"state"`
+	SizeMiB             int    `json:"sizeMiB,omitempty"`
+	AttachedTo          string `json:"attachedTo,omitempty"`
+	NodeID              string `json:"nodeId,omitempty"`
+	DeleteOnTermination bool   `json:"deleteOnTermination,omitempty"`
 }
 
 // Volume is a named, independent block device.
@@ -124,11 +125,12 @@ func NewVolume(v core.Volume) Volume {
 			DeleteOnTermination: v.DeleteOnTermination,
 		},
 		Status: VolumeStatus{
-			ID:         v.ID,
-			State:      string(v.State),
-			SizeMiB:    v.SizeMiB,
-			AttachedTo: v.AttachedTo,
-			NodeID:     v.NodeID,
+			ID:                  v.ID,
+			State:               string(v.State),
+			SizeMiB:             v.SizeMiB,
+			AttachedTo:          v.AttachedTo,
+			NodeID:              v.NodeID,
+			DeleteOnTermination: v.DeleteOnTermination,
 		},
 	}
 }

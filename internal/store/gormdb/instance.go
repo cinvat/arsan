@@ -284,18 +284,22 @@ func (s *Store) SetNodeSpec(ctx context.Context, id string, engine string, total
 		}
 		return core.Node{}, fmt.Errorf("set spec %s: %w", id, err)
 	}
-	heldVCPU := row.TotalVCPU - row.AvailableVCPU
-	heldRAM := row.TotalRAM - row.AvailableRAM
-	heldDisk := row.TotalDisk - row.AvailableDisk
 	updates := map[string]any{
-		"driver":         engine,
-		"total_vcpu":     total.CPU,
-		"total_ram":      total.RAM,
-		"total_disk":     total.Disk,
-		"available_vcpu": max(total.CPU-heldVCPU, 0),
-		"available_ram":  max(total.RAM-heldRAM, 0),
-		"available_disk": max(total.Disk-heldDisk, 0),
-		"updated_at":     time.Now().UTC(),
+		"driver":     engine,
+		"updated_at": time.Now().UTC(),
+	}
+	// A zero total means "unknown" (the fake engine has nothing to detect):
+	// keep whatever capacity the node already carries instead of wiping it.
+	if total != (core.Resources{}) {
+		heldVCPU := row.TotalVCPU - row.AvailableVCPU
+		heldRAM := row.TotalRAM - row.AvailableRAM
+		heldDisk := row.TotalDisk - row.AvailableDisk
+		updates["total_vcpu"] = total.CPU
+		updates["total_ram"] = total.RAM
+		updates["total_disk"] = total.Disk
+		updates["available_vcpu"] = max(total.CPU-heldVCPU, 0)
+		updates["available_ram"] = max(total.RAM-heldRAM, 0)
+		updates["available_disk"] = max(total.Disk-heldDisk, 0)
 	}
 	if err := s.withTimeout(ctx).Model(&nodeRow{}).Where("id = ?", id).Updates(updates).Error; err != nil {
 		return core.Node{}, fmt.Errorf("set spec %s: %w", id, err)
