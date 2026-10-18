@@ -71,6 +71,7 @@ func Register(r *gin.Engine, cfg Config) {
 	g.DELETE("/virtualmachines/:id/volumes/:volumeId", h.DetachVolume)
 	g.POST("/virtualmachines/:id/boot", h.SetBootVolume)
 	g.GET("/virtualmachines/:id/console", h.ConsoleVirtualMachine)
+	g.GET("/namespaces/:namespace/virtualmachines/:name/vnc", h.ConsoleVirtualMachineByName)
 
 	// Volumes. Named, independent block devices: create from a base, blank,
 	// or an iso; attach by id; delete removes the record (and the file only

@@ -371,6 +371,37 @@ func (h *Handler) ConsoleVirtualMachine(c *gin.Context) {
 		writeErr(c, err)
 		return
 	}
+	h.serveConsole(c, inst)
+}
+
+// ConsoleVirtualMachineByName resolves a VM by namespace/name, Kubernetes-style,
+// and bridges its VNC console.
+func (h *Handler) ConsoleVirtualMachineByName(c *gin.Context) {
+	ns := c.Param("namespace")
+	name := c.Param("name")
+	insts, err := h.instances.List(c.Request.Context())
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	var inst core.Instance
+	found := false
+	for _, i := range insts {
+		if i.Namespace == ns && i.Name == name {
+			inst = i
+			found = true
+			break
+		}
+	}
+	if !found {
+		writeErr(c, core.ErrInstanceNotFound)
+		return
+	}
+	h.serveConsole(c, inst)
+}
+
+func (h *Handler) serveConsole(c *gin.Context, inst core.Instance) {
+	id := inst.ID
 	if inst.VNCPort == 0 {
 		writeErr(c, fmt.Errorf("vnc not available for %s: %w", id, core.ErrInvalidRequest))
 		return
