@@ -48,12 +48,19 @@ type FlavorSpec struct {
 	Memory core.Quantity `json:"memory"`
 }
 
+// FlavorStatus is a flavor's observed state. Flavors are named, so the
+// internal address is the name itself.
+type FlavorStatus struct {
+	ID string `json:"id"`
+}
+
 // Flavor is a named, immutable sizing.
 type Flavor struct {
-	APIVersion string     `json:"apiVersion"`
-	Kind       string     `json:"kind"`
-	Metadata   ObjectMeta `json:"metadata"`
-	Spec       FlavorSpec `json:"spec"`
+	APIVersion string       `json:"apiVersion"`
+	Kind       string       `json:"kind"`
+	Metadata   ObjectMeta   `json:"metadata"`
+	Spec       FlavorSpec   `json:"spec"`
+	Status     FlavorStatus `json:"status"`
 }
 
 // NewFlavor renders a stored flavor as an object.
@@ -63,6 +70,7 @@ func NewFlavor(f core.Flavor) Flavor {
 		Kind:       "Flavor",
 		Metadata:   ObjectMeta{Name: f.Name},
 		Spec:       FlavorSpec{Name: f.Name, VCPU: f.VCPU, Memory: core.Quantity(f.RAM)},
+		Status:     FlavorStatus{ID: f.Name},
 	}
 }
 
