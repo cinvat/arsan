@@ -95,6 +95,9 @@ func domainXML(name string, req core.CreateRequest, files, bases map[string]stri
       <target type='serial' port='0'/>
     </console>
     <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'/>
+    <rng model='virtio'>
+      <backend model='random'>/dev/urandom</backend>
+    </rng>
   </devices>
 </domain>
 `, name, meta, req.Flavor.RAM*1024, v.Count(), pinning, topology, storageXML(req, files, bases))
