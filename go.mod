@@ -3,6 +3,7 @@ module github.com/cinvat/arsan
 go 1.27.1
 
 require (
+	github.com/cinvat/apimachinery v0.1.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/nats-io/nats.go v1.54.0

@@ -7,6 +7,7 @@
 package object
 
 import (
+	corev1 "github.com/cinvat/apimachinery/api/core/v1"
 	"github.com/cinvat/arsan/internal/core"
 )
 
@@ -27,12 +28,10 @@ const APIVersion = "v1alpha1"
 // fields — because it is not Kubernetes, only Kubernetes-shaped enough for a
 // client to create, apply, patch and delete uniformly.
 
-// ObjectMeta is the client-visible identity of an object: the address a client
-// uses, and nothing internal.
-type ObjectMeta struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace,omitempty"`
-}
+// ObjectMeta is the shared contract type from apimachinery: the
+// client-visible identity of an object, reused rather than redefined so the
+// envelope cannot drift between services.
+type ObjectMeta = corev1.ObjectMeta
 
 // APIResourceList is defined in discovery.go; the object kinds below are the
 // concrete shapes it advertises.

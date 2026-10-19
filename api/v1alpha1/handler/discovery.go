@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	corev1 "github.com/cinvat/apimachinery/api/core/v1"
 	"github.com/gin-gonic/gin"
 )
 
@@ -11,23 +12,14 @@ import (
 // string lives here and the route table ties the two together.
 const groupVersion = "v1alpha1"
 
-// APIResource is one kind in the discovery document: the join key a client
-// uses to turn a manifest's kind into a collection path, plus the addressing
-// facts (plural name, namespacing) it needs to build one.
-type APIResource struct {
-	Name         string   `json:"name"`
-	SingularName string   `json:"singularName"`
-	Namespaced   bool     `json:"namespaced"`
-	Kind         string   `json:"kind"`
-	Verbs        []string `json:"verbs"`
-}
-
-// APIResourceList is the Kubernetes-style discovery document served at the
-// groupVersion path.
-type APIResourceList struct {
-	GroupVersion string        `json:"groupVersion"`
-	Resources    []APIResource `json:"resources"`
-}
+// APIResource and APIResourceList are the shared discovery contract from
+// apimachinery, reused rather than redefined. APIResource is one kind: the
+// join key a client uses to turn a manifest's kind into a collection path,
+// plus the addressing facts (plural name, namespacing) it needs to build one.
+type (
+	APIResource     = corev1.APIResource
+	APIResourceList = corev1.APIResourceList
+)
 
 // resources is the route table as data. It is the single place this version
 // names its kinds, so discovery cannot drift from the routes below it: a new
