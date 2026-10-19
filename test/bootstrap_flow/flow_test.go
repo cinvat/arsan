@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func TestAgentRegistersWithRealAPI(t *testing.T) {
 	t.Cleanup(stop)
 
 	// The agent side, exactly as cmd/agent.go calls it.
-	node, err := agent.Register(t.Context(), srv.URL, "v1alpha1", "shared-secret", agent.BootstrapRequest{
+	node, err := agent.Register(t.Context(), srv.URL, strings.TrimPrefix(v1alpha1.GroupVersionPath, "/"), "shared-secret", agent.BootstrapRequest{
 		Name: "compute-1",
 	})
 	if err != nil {
@@ -109,7 +110,7 @@ func TestAgentWithWrongTokenCannotJoin(t *testing.T) {
 	})
 	srv := newTestServer(t, engine)
 
-	_, err = agent.Register(t.Context(), srv.URL, "v1alpha1", "a-guess", agent.BootstrapRequest{
+	_, err = agent.Register(t.Context(), srv.URL, strings.TrimPrefix(v1alpha1.GroupVersionPath, "/"), "a-guess", agent.BootstrapRequest{
 		Name: "compute-9",
 	})
 	if err == nil {

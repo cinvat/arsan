@@ -15,6 +15,17 @@ import (
 // APIVersion is the path segment this version is served under.
 const APIVersion = "v1alpha1"
 
+// ServicePrefix is this API's mount point under an aggregation origin:
+// /apis/<api-service-name>, the convention kloudapi fronts every downstream
+// by. arsan serves /apis/arsan/v1alpha1/... so the origin can proxy it
+// verbatim alongside other apiservices instead of owning the root.
+const ServicePrefix = "/apis/arsan"
+
+// GroupVersionPath is the full path this API is served under, after the host:
+// /apis/arsan/v1alpha1. Clients that address it directly (the node agent) build
+// their requests from this rather than assuming the root.
+const GroupVersionPath = ServicePrefix + "/" + APIVersion
+
 // Config carries the services and the bootstrap credential.
 //
 // The api is CRUD plus authentication. It never places and never calls the
@@ -40,9 +51,9 @@ func Register(r *gin.Engine, cfg Config) {
 		Bus:   cfg.Bus,
 	}
 
-	g := r.Group(APIVersion)
+	g := r.Group(ServicePrefix + "/" + APIVersion)
 
-	// Discovery. GET /v1alpha1 is the APIResourceList an aggregation origin
+	// Discovery. GET /apis/arsan/v1alpha1 is the APIResourceList an aggregation origin
 	// (kloudapi) fetches to learn this version's kinds; it is the group
 	// version itself, not a subresource.
 	g.GET("", handler.Discovery)

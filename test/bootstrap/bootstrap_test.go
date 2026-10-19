@@ -28,7 +28,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const version = "v1alpha1"
+// version is where the api is mounted, not just the bare version: the
+// /apis/arsan prefix is part of every path a direct client addresses.
+const version = v1alpha1.GroupVersionPath
 
 func natsURL(t *testing.T) string {
 	t.Helper()
@@ -129,7 +131,7 @@ func (h *harness) post(t *testing.T, payload map[string]any) *httptest.ResponseR
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/"+version+"/nodes", bytes.NewReader(blob))
+	req := httptest.NewRequest(http.MethodPost, version+"/nodes", bytes.NewReader(blob))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.router.ServeHTTP(w, req)

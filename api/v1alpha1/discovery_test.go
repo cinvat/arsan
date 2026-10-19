@@ -35,9 +35,9 @@ func newTestEngine(t *testing.T) (*gin.Engine, *memory.Store) {
 func TestDiscoveryNamesEveryKind(t *testing.T) {
 	r, _ := newTestEngine(t)
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1alpha1", nil))
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, ServicePrefix+"/"+APIVersion, nil))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /v1alpha1 = %d, want 200", rec.Code)
+		t.Fatalf("GET %s/%s = %d, want 200", ServicePrefix, APIVersion, rec.Code)
 	}
 	var doc struct {
 		GroupVersion string `json:"groupVersion"`
@@ -80,9 +80,9 @@ func TestGetNodeIsRouted(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1alpha1/nodes/"+n.ID, nil))
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, ServicePrefix+"/"+APIVersion+"/nodes/"+n.ID, nil))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /v1alpha1/nodes/%s = %d, want 200", n.ID, rec.Code)
+		t.Fatalf("GET %s/%s/nodes/%s = %d, want 200", ServicePrefix, APIVersion, n.ID, rec.Code)
 	}
 	var got object.Node
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {

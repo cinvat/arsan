@@ -6,9 +6,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/cinvat/arsan/api/v1alpha1"
 	"github.com/cinvat/arsan/internal/agent"
 	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/core"
@@ -64,7 +66,11 @@ var agentCmd = &cobra.Command{
 		// controller learns everything else by asking, after the probe says
 		// the agent answers.
 		node, err := agent.RetryBootstrap(ctx, func(c context.Context) (core.Node, error) {
-			return agent.Register(c, viper.GetString("api.url"), "v1alpha1", token,
+			// Register hits the api where it is mounted: /apis/arsan/v1alpha1,
+			// whether api.url points at arsan directly or at the kloudapi
+			// origin fronting it. strings.TrimPrefix drops the leading slash
+			// Register would otherwise double.
+			return agent.Register(c, viper.GetString("api.url"), strings.TrimPrefix(v1alpha1.GroupVersionPath, "/"), token,
 				agent.BootstrapRequest{Name: name, IP: agent.HostIP()})
 		}, bootstrapAttempts, bootstrapBackoff)
 		if err != nil {
