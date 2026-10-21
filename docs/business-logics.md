@@ -729,3 +729,12 @@ rediscovered:
   `virDomainAttachDeviceFlags`; only the boot move needs a stopped redefine.
   Detach never deletes: only VM delete with delete-on-termination removes
   the file.
+- **Networking.** *Settled: logical ports owned by alvand.* A VM names
+  existing ports by id (`spec.interfaces[].portId`); the controller binds
+  them during placement, passing the node's name as the OVN chassis, and
+  records the resolved MAC/IP/iface-id on the instance so redefines do not
+  depend on alvand being up. The agent renders each port as an OVS interface
+  on `br-int` with `iface-id`, and libvirt/`ovn-controller` does the rest. No
+  interfaces keeps libvirt's default network, so pre-OVN VMs still boot.
+  Attach is idempotent; detach on delete is best-effort because the guest is
+  already gone.

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/cinvat/arsan/internal/alvand"
 	"github.com/cinvat/arsan/internal/bus"
 	"github.com/cinvat/arsan/internal/compute"
 	"github.com/cinvat/arsan/internal/core"
@@ -26,6 +27,9 @@ type Config struct {
 	SchedulerMaxAttempts   int
 	ComputeSweepInterval   time.Duration
 	ComputeDriverOpTimeout time.Duration
+	// AlvandURL is the alvand origin (for example http://127.0.0.1:8080).
+	// Empty disables logical port binding: VMs without interfaces still work.
+	AlvandURL string
 }
 
 // Logger is the narrow logging surface services accept.
@@ -66,6 +70,10 @@ func NewController(cfg Config, store Stores, commands bus.Bus, log Logger) (*Con
 		MaxAttempts: cfg.SchedulerMaxAttempts,
 		Log:         log,
 	})
+	var ports core.PortBinder
+	if cfg.AlvandURL != "" {
+		ports = alvand.New(cfg.AlvandURL)
+	}
 	c := &Controller{
 		Store:     store,
 		Commands:  commands,
@@ -76,6 +84,7 @@ func NewController(cfg Config, store Stores, commands bus.Bus, log Logger) (*Con
 			Volumes:                store,
 			Scheduler:              sched,
 			DriverFor:              drivers(commands),
+			Ports:                  ports,
 			DriverOperationTimeout: cfg.ComputeDriverOpTimeout,
 			SweepInterval:          cfg.ComputeSweepInterval,
 			Log:                    log,

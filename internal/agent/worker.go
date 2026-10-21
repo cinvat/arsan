@@ -38,17 +38,18 @@ const (
 
 // Request is one engine call.
 type Request struct {
-	Op           Operation             `json:"op"`
-	InstanceID   string                `json:"instance_id,omitempty"`
-	NodeID       string                `json:"node_id,omitempty"`
-	Name         string                `json:"name,omitempty"`
-	Namespace    string                `json:"namespace,omitempty"`
-	Flavor       core.Flavor           `json:"flavor,omitempty"`
-	Volumes      []core.AttachedVolume `json:"volumes,omitempty"`
-	Volume       core.AttachedVolume   `json:"volume,omitempty"`
-	PinnedCPUs   []int                 `json:"pinned_cpus,omitempty"`
-	ImageRef     string                `json:"image_ref,omitempty"`
-	TargetNodeID string                `json:"target_node_id,omitempty"`
+	Op           Operation                     `json:"op"`
+	InstanceID   string                        `json:"instance_id,omitempty"`
+	NodeID       string                        `json:"node_id,omitempty"`
+	Name         string                        `json:"name,omitempty"`
+	Namespace    string                        `json:"namespace,omitempty"`
+	Flavor       core.Flavor                   `json:"flavor,omitempty"`
+	Volumes      []core.AttachedVolume         `json:"volumes,omitempty"`
+	Volume       core.AttachedVolume           `json:"volume,omitempty"`
+	Interfaces   []core.LogicalSwitchInterface `json:"interfaces,omitempty"`
+	PinnedCPUs   []int                         `json:"pinned_cpus,omitempty"`
+	ImageRef     string                        `json:"image_ref,omitempty"`
+	TargetNodeID string                        `json:"target_node_id,omitempty"`
 }
 
 // Response answers it. Info, Usage and Domains ride along only on their own ops.
@@ -182,7 +183,7 @@ func (w *Worker) exec(ctx context.Context, req Request) (Response, error) {
 func createRequestOf(req Request) core.CreateRequest {
 	return core.CreateRequest{
 		InstanceID: req.InstanceID, NodeID: req.NodeID, Name: req.Name, Namespace: req.Namespace,
-		Flavor: req.Flavor, Volumes: req.Volumes,
+		Flavor: req.Flavor, Volumes: req.Volumes, Interfaces: req.Interfaces,
 		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
 	}
 }

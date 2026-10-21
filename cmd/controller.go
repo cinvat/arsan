@@ -44,6 +44,7 @@ neither imports the other's libraries.`,
 			SchedulerMaxAttempts:   viper.GetInt("scheduler.max-attempts"),
 			ComputeSweepInterval:   viper.GetDuration("compute.sweep-interval"),
 			ComputeDriverOpTimeout: viper.GetDuration("compute.driver-operation-timeout"),
+			AlvandURL:              viper.GetString("alvand.url"),
 		}, store, commands, log)
 		if err != nil {
 			return err
@@ -150,6 +151,7 @@ func init() {
 	controllerCmd.Flags().Int("scheduler.max-attempts", 5, "placement attempts before giving up")
 	controllerCmd.Flags().Duration("compute.sweep-interval", 30*time.Second, "how often to reconcile stranded instances")
 	controllerCmd.Flags().Duration("compute.driver-operation-timeout", 5*time.Minute, "deadline for a single compute engine call")
+	controllerCmd.Flags().String("alvand.url", "", "alvand origin for logical port binding (http://host:port); empty disables it")
 
 	rootCmd.AddCommand(controllerCmd)
 }

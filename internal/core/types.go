@@ -164,6 +164,19 @@ func VolumeResources(volumes []Volume) Resources {
 	return out
 }
 
+// LogicalSwitchInterface is one vNIC attached to a logical switch. PortID
+// names the alvand LogicalPort; the remaining fields are resolved from alvand
+// at build time and persisted so a redefine never depends on it being
+// reachable. OVNLogicalPort is the value passed to OVN as iface-id.
+type LogicalSwitchInterface struct {
+	PortID         string
+	MAC            string
+	IP             string
+	OVNLogicalPort string
+	VIFType        string
+	Bridge         string
+}
+
 type Instance struct {
 	ID string
 	// Name and Namespace identify the VM like a pod: the hypervisor domain
@@ -173,7 +186,10 @@ type Instance struct {
 	Flavor    Flavor
 	// Volumes lists attached volume ids with their device and boot order.
 	// The record of sizes and images lives on the volume rows, not here.
-	Volumes    []VolumeAttachment
+	Volumes []VolumeAttachment
+	// Interfaces lists the vNICs in render order. Empty means the engine's
+	// default network, which keeps pre-OVN VMs working.
+	Interfaces []LogicalSwitchInterface
 	ImageRef   string
 	State      InstanceState
 	NodeID     string

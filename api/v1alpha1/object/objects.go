@@ -228,6 +228,24 @@ type VirtualMachineSpec struct {
 	// Volumes attaches storage at create: inline sources to provision, or
 	// {volume_id} to claim a prepared volume. Managed via subresources after.
 	Volumes []VolumeSource `json:"volumes,omitempty"`
+	// Interfaces attaches existing alvand logical ports by id. Details are
+	// resolved by the controller and echoed in status.
+	Interfaces []InterfaceSource `json:"interfaces,omitempty"`
+}
+
+type InterfaceSource struct {
+	PortID string `json:"portId"`
+}
+
+// InterfaceStatus is a VM's view of one vNIC after the controller resolved
+// it against alvand.
+type InterfaceStatus struct {
+	PortID         string `json:"portId"`
+	MAC            string `json:"mac,omitempty"`
+	IP             string `json:"ip,omitempty"`
+	OVNLogicalPort string `json:"ovnLogicalPort,omitempty"`
+	VIFType        string `json:"vifType,omitempty"`
+	Bridge         string `json:"bridge,omitempty"`
 }
 
 // VolumeAttachmentStatus is a VM's view of one attached volume.
@@ -245,6 +263,7 @@ type VirtualMachineStatus struct {
 	ImageRef      string                   `json:"imageRef,omitempty"`
 	Flavor        FlavorSpec               `json:"flavor"`
 	Volumes       []VolumeAttachmentStatus `json:"volumes,omitempty"`
+	Interfaces    []InterfaceStatus        `json:"interfaces,omitempty"`
 	PinnedCPUs    []int                    `json:"pinnedCPUs,omitempty"`
 	VNCPort       int                      `json:"vncPort,omitempty"`
 	PendingReason string                   `json:"pendingReason,omitempty"`
@@ -268,6 +287,13 @@ func NewVirtualMachine(i core.Instance) VirtualMachine {
 	for _, a := range i.Volumes {
 		vols = append(vols, VolumeAttachmentStatus{VolumeID: a.VolumeID, Device: a.Device, BootIndex: a.BootIndex})
 	}
+	ifaces := make([]InterfaceStatus, 0, len(i.Interfaces))
+	for _, n := range i.Interfaces {
+		ifaces = append(ifaces, InterfaceStatus{
+			PortID: n.PortID, MAC: n.MAC, IP: n.IP,
+			OVNLogicalPort: n.OVNLogicalPort, VIFType: n.VIFType, Bridge: n.Bridge,
+		})
+	}
 	return VirtualMachine{
 		APIVersion: APIVersion,
 		Kind:       "VirtualMachine",
@@ -279,7 +305,7 @@ func NewVirtualMachine(i core.Instance) VirtualMachine {
 		Status: VirtualMachineStatus{
 			ID: i.ID, State: string(i.State), NodeID: i.NodeID, ImageRef: i.ImageRef,
 			Flavor:  FlavorSpec{Name: i.Flavor.Name, VCPU: i.Flavor.VCPU, Memory: core.Quantity(i.Flavor.RAM)},
-			Volumes: vols, PinnedCPUs: i.PinnedCPUs, VNCPort: i.VNCPort,
+			Volumes: vols, Interfaces: ifaces, PinnedCPUs: i.PinnedCPUs, VNCPort: i.VNCPort,
 			PendingReason: i.PendingReason, FailureReason: i.FailureReason,
 		},
 	}
@@ -296,6 +322,9 @@ func (v VirtualMachine) ToCreateRequest() core.CreateInstanceRequest {
 	}
 	for _, vol := range v.Spec.Volumes {
 		req.Volumes = append(req.Volumes, vol.ToVolumeSpec())
+	}
+	for _, n := range v.Spec.Interfaces {
+		req.Interfaces = append(req.Interfaces, core.LogicalSwitchInterface{PortID: n.PortID})
 	}
 	return req
 }

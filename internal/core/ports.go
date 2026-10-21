@@ -56,6 +56,9 @@ type CreateRequest struct {
 	// data overlays and blank disks, and read-only cdroms, each with the
 	// device name the attachment assigned.
 	Volumes []AttachedVolume
+	// Interfaces carries the resolved vNICs in render order. Empty keeps the
+	// engine's default network for VMs created before logical switches.
+	Interfaces []LogicalSwitchInterface
 	// PinnedCPUs carries the scheduler's exclusive CPUs for a dedicated
 	// flavor. Empty for shared flavors; the engine pins only what is here.
 	PinnedCPUs []int
@@ -145,6 +148,19 @@ type CreateInstanceRequest struct {
 	// or {volume_id} to claim a prepared one. A rescue disk is just another
 	// entry here, booted with SetBootVolume.
 	Volumes []VolumeSpec `json:"volumes"`
+	// Interfaces attaches existing alvand LogicalPorts by id. Their MAC,
+	// IP, iface-id and bridge are resolved by the controller at build time.
+	Interfaces []LogicalSwitchInterface `json:"interfaces,omitempty"`
+}
+
+// PortBinder is the controller's view of alvand's logical port API. It is
+// consumer-owned so compute depends on the verbs, not the HTTP client.
+type PortBinder interface {
+	// Attach binds the port to instanceRef on bindingHost (the OVN chassis
+	// name) and returns the resolved VIF details.
+	Attach(ctx context.Context, portID, instanceRef, device, bindingHost string) (LogicalSwitchInterface, error)
+	// Detach releases the attachment. A missing port is not an error.
+	Detach(ctx context.Context, portID string) error
 }
 
 // VolumeSpec is one block_device_mapping entry, Nova-style: either an

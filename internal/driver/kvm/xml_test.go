@@ -59,6 +59,47 @@ func TestDomainXML(t *testing.T) {
 	}
 }
 
+func TestDomainXMLInterfaces(t *testing.T) {
+	req := core.CreateRequest{
+		InstanceID: "i-3", Name: "web1", Namespace: "team-a",
+		Flavor: core.Flavor{Name: "m1", VCPU: core.VCPUCount(1), RAM: 1},
+		Interfaces: []core.LogicalSwitchInterface{
+			{PortID: "port-1", MAC: "02:00:00:00:00:01", OVNLogicalPort: "port-1", VIFType: "ovs", Bridge: "br-int"},
+			{PortID: "port-2", MAC: "02:00:00:00:00:02", VIFType: "bridge", Bridge: "br-ex"},
+		},
+	}
+	xml := domainXML(domainName(req), req, nil, nil)
+	for _, want := range []string{
+		"<interface type='bridge'>",
+		"<mac address='02:00:00:00:00:01'/>",
+		"<source bridge='br-int'/>",
+		"<virtualport type='openvswitch'>",
+		"<parameters interfaceid='port-1'/>",
+		"<source bridge='br-ex'/>",
+	} {
+		if !strings.Contains(xml, want) {
+			t.Errorf("domain xml missing %q:\n%s", want, xml)
+		}
+	}
+	if strings.Contains(xml, "network='default'") {
+		t.Errorf("interfaces must replace the default network:\n%s", xml)
+	}
+	if strings.Count(xml, "type='openvswitch'") != 1 {
+		t.Errorf("only the ovs interface gets a virtualport:\n%s", xml)
+	}
+}
+
+func TestDomainXMLDefaultNetworkWithoutInterfaces(t *testing.T) {
+	req := core.CreateRequest{
+		InstanceID: "i-4",
+		Flavor:     core.Flavor{Name: "m1", VCPU: core.VCPUCount(1)},
+	}
+	xml := domainXML("arsan-i-4", req, nil, nil)
+	if !strings.Contains(xml, "<source network='default'/>") {
+		t.Fatalf("pre-OVN VMs must keep the default network:\n%s", xml)
+	}
+}
+
 func TestDomainXMLDedicated(t *testing.T) {
 	zero := 0
 	req := core.CreateRequest{

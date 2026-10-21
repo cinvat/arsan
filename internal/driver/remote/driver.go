@@ -125,7 +125,7 @@ func fullRequest(op agent.Operation, req core.CreateRequest) agent.Request {
 	return agent.Request{
 		Op: op, InstanceID: req.InstanceID, NodeID: req.NodeID,
 		Name: req.Name, Namespace: req.Namespace, Flavor: req.Flavor, Volumes: req.Volumes,
-		PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
+		Interfaces: req.Interfaces, PinnedCPUs: req.PinnedCPUs, ImageRef: req.ImageRef,
 	}
 }
 

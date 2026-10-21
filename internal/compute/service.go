@@ -19,11 +19,15 @@ const (
 type DriverFor func(nodeID string) (core.Driver, error)
 
 type Config struct {
-	Instances              core.InstanceStore
-	Nodes                  core.NodeStore
-	Volumes                core.VolumeStore
-	Scheduler              core.Scheduler
-	DriverFor              DriverFor
+	Instances core.InstanceStore
+	Nodes     core.NodeStore
+	Volumes   core.VolumeStore
+	Scheduler core.Scheduler
+	DriverFor DriverFor
+	// Ports binds logical switch interfaces to alvand. Nil means the
+	// controller has no alvand configured: VMs without interfaces still
+	// build, VMs that ask for one fail with a clear error.
+	Ports                  core.PortBinder
 	DriverOperationTimeout time.Duration
 	SweepInterval          time.Duration
 	StaleAfter             time.Duration
@@ -79,6 +83,8 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 			return err
 		}
 	}
+	// The guest is gone, so release its vNICs before the row disappears.
+	s.detachInterfaces(ctx, inst)
 	// Free the volumes: detach everything, then delete the records that
 	// asked to die with the VM. Shared volumes survive as available rows;
 	// cdroms always survive (their delete flag is forced off).
@@ -266,9 +272,53 @@ func (s *Service) createRequestOf(ctx context.Context, inst core.Instance) (core
 	}
 	return core.CreateRequest{
 		InstanceID: inst.ID, NodeID: inst.NodeID, Name: inst.Name, Namespace: inst.Namespace,
-		Flavor: inst.Flavor, Volumes: attached,
+		Flavor: inst.Flavor, Volumes: attached, Interfaces: inst.Interfaces,
 		PinnedCPUs: inst.PinnedCPUs, ImageRef: inst.ImageRef,
 	}, nil
+}
+
+// attachInterfaces binds every vNIC to the placed node and records the
+// resolved details on the instance. The OVN chassis name is the node's name
+// (the agent defaults it to the hostname), not the internal node id.
+//
+// A retry re-attaches: alvand's attach is idempotent, and re-reading keeps a
+// redefined domain from rendering stale MAC/IP after a port change.
+func (s *Service) attachInterfaces(ctx context.Context, inst core.Instance) (core.Instance, error) {
+	if s.cfg.Ports == nil {
+		return inst, fmt.Errorf("instance %s has interfaces but the controller has no alvand url: %w", inst.ID, core.ErrInvalidRequest)
+	}
+	node, err := s.cfg.Nodes.GetNode(ctx, inst.NodeID)
+	if err != nil {
+		return inst, fmt.Errorf("resolve node %s: %w", inst.NodeID, err)
+	}
+	chassis := node.Name
+	if chassis == "" {
+		chassis = inst.NodeID
+	}
+	for i := range inst.Interfaces {
+		n := inst.Interfaces[i]
+		bound, err := s.cfg.Ports.Attach(ctx, n.PortID, inst.ID, fmt.Sprintf("eth%d", i), chassis)
+		if err != nil {
+			return inst, fmt.Errorf("attach port %s: %w", n.PortID, err)
+		}
+		bound.PortID = n.PortID
+		inst.Interfaces[i] = bound
+	}
+	return s.cfg.Instances.Update(ctx, inst)
+}
+
+// detachInterfaces releases the VM's ports on alvand. Best effort by design:
+// the guest is already gone, and a stale attachment must not keep the record
+// from being deleted. A later retry or operator action can detach it.
+func (s *Service) detachInterfaces(ctx context.Context, inst core.Instance) {
+	if s.cfg.Ports == nil {
+		return
+	}
+	for _, n := range inst.Interfaces {
+		if err := s.cfg.Ports.Detach(ctx, n.PortID); err != nil {
+			s.cfg.Log.Error("port detach", "instance", inst.ID, "port", n.PortID, "err", err)
+		}
+	}
 }
 
 // liveStates are the states a volume may be attached to or detached from.
@@ -526,6 +576,13 @@ func (s *Service) build(ctx context.Context, id string) error {
 		return fmt.Errorf("record placement: %w", err)
 	}
 
+	if len(inst.Interfaces) > 0 {
+		inst, err = s.attachInterfaces(ctx, inst)
+		if err != nil {
+			return s.fail(ctx, id, core.StateScheduling, err)
+		}
+	}
+
 	req, err := s.createRequestOf(ctx, inst)
 	if err != nil {
 		return fmt.Errorf("resolve volumes %s: %w", id, err)
@@ -592,6 +649,8 @@ func (s *Service) fail(ctx context.Context, id string, from core.InstanceState, 
 	if _, uerr := s.cfg.Instances.Update(ctx, inst); uerr != nil {
 		s.cfg.Log.Warn("record failure reason", "instance", id, "err", uerr)
 	}
+	// The engine never took ownership of the vNICs, so release them too.
+	s.detachInterfaces(ctx, inst)
 	// Free what the placement claimed: volumes first so a retry starts
 	// unattached, then the node counts. Inline-created volumes stay on disk
 	// as reusable available rows rather than leaking attached.

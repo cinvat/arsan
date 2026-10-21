@@ -111,6 +111,7 @@ type instanceRow struct {
 	FlavorDisk      int    `gorm:"column:flavor_disk"`
 	PinnedCPUs      string `gorm:"column:pinned_cpus;type:text"`      // comma-separated, dedicated only
 	AttachmentsJSON string `gorm:"column:attachments_json;type:text"` // volume attachments, JSON
+	InterfacesJSON  string `gorm:"column:interfaces_json;type:text"`  // logical switch interfaces, JSON
 	ImageRef        string `gorm:"size:512"`
 	State           string `gorm:"size:32;index"`
 	NodeID          string `gorm:"size:64;index"`
@@ -215,13 +216,14 @@ func toInstance(r instanceRow) core.Instance {
 		Flavor:        core.Flavor{Name: r.FlavorName, VCPU: vcpu, RAM: r.FlavorRAM},
 		PinnedCPUs:    splitInts(r.PinnedCPUs),
 		Volumes:       decodeAttachments(r.AttachmentsJSON),
+		Interfaces:    decodeInterfaces(r.InterfacesJSON),
 		ImageRef:      r.ImageRef,
 		State:         core.InstanceState(r.State),
 		NodeID:        r.NodeID,
 		Generation:    r.Generation,
 		PendingReason: r.PendingReason,
 		FailureReason: r.FailureReason,
-		VNCPort:      r.VNCPort,
+		VNCPort:       r.VNCPort,
 		CreatedAt:     r.CreatedAt,
 		UpdatedAt:     r.UpdatedAt,
 	}
@@ -241,6 +243,7 @@ func fromInstance(i core.Instance) instanceRow {
 		FlavorRAM:       i.Flavor.RAM,
 		PinnedCPUs:      joinInts(i.PinnedCPUs),
 		AttachmentsJSON: encodeAttachments(i.Volumes),
+		InterfacesJSON:  encodeInterfaces(i.Interfaces),
 		ImageRef:        i.ImageRef,
 		State:           string(i.State),
 		NodeID:          i.NodeID,
@@ -344,6 +347,28 @@ func decodeAttachments(s string) []core.VolumeAttachment {
 		return nil
 	}
 	var out []core.VolumeAttachment
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func encodeInterfaces(ifaces []core.LogicalSwitchInterface) string {
+	if len(ifaces) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(ifaces)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func decodeInterfaces(s string) []core.LogicalSwitchInterface {
+	if s == "" {
+		return nil
+	}
+	var out []core.LogicalSwitchInterface
 	if err := json.Unmarshal([]byte(s), &out); err != nil {
 		return nil
 	}

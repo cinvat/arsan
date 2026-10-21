@@ -93,6 +93,65 @@ func withRoot(t *testing.T, st *memory.Store, inst core.Instance) core.Instance 
 	return updated
 }
 
+type fakePorts struct {
+	attached []string
+	hosts    []string
+	detached []string
+}
+
+func (f *fakePorts) Attach(_ context.Context, portID, instanceRef, device, bindingHost string) (core.LogicalSwitchInterface, error) {
+	f.attached = append(f.attached, portID)
+	f.hosts = append(f.hosts, bindingHost)
+	return core.LogicalSwitchInterface{
+		PortID: portID, MAC: "02:00:00:00:00:01", IP: "10.0.0.5",
+		OVNLogicalPort: portID, VIFType: "ovs", Bridge: "br-int",
+	}, nil
+}
+
+func (f *fakePorts) Detach(_ context.Context, portID string) error {
+	f.detached = append(f.detached, portID)
+	return nil
+}
+
+func TestBuildAttachesInterfacesAndDeleteDetaches(t *testing.T) {
+	svc, st, _ := setup(t)
+	ctx := context.Background()
+	inst := pending(t, st, "i-if")
+	inst.Interfaces = []core.LogicalSwitchInterface{{PortID: "port-1"}}
+	inst, err := st.Update(ctx, inst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withRoot(t, st, inst)
+
+	ports := &fakePorts{}
+	svc.cfg.Ports = ports
+	if err := svc.Build(ctx, inst); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if len(ports.attached) != 1 || ports.attached[0] != "port-1" {
+		t.Fatalf("attached = %v", ports.attached)
+	}
+	// The chassis is the node's name, which defaults to the hostname.
+	if ports.hosts[0] != "compute-1" {
+		t.Fatalf("binding host = %q, want compute-1", ports.hosts[0])
+	}
+	got, err := st.Get(ctx, "i-if")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Interfaces) != 1 || got.Interfaces[0].MAC != "02:00:00:00:00:01" || got.Interfaces[0].Bridge != "br-int" {
+		t.Fatalf("resolved interfaces = %+v", got.Interfaces)
+	}
+
+	if err := svc.Delete(ctx, "i-if"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(ports.detached) != 1 || ports.detached[0] != "port-1" {
+		t.Fatalf("detached = %v", ports.detached)
+	}
+}
+
 // Build places, claims, creates and starts: PENDING straight to RUNNING.
 func TestBuildLifecycle(t *testing.T) {
 	svc, st, _ := setup(t)

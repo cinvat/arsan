@@ -255,6 +255,28 @@ type Instances struct {
 	Bus     bus.Bus
 }
 
+// resolveInterfaces validates the request's vNICs. Only the port id is known
+// here: the resolved MAC/IP/bridge come from alvand at build time, on the
+// node the VM lands on.
+func resolveInterfaces(in []core.LogicalSwitchInterface) ([]core.LogicalSwitchInterface, error) {
+	if len(in) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(in))
+	out := make([]core.LogicalSwitchInterface, 0, len(in))
+	for i, n := range in {
+		if n.PortID == "" {
+			return nil, fmt.Errorf("interface entry %d: portId required: %w", i, core.ErrInvalidRequest)
+		}
+		if seen[n.PortID] {
+			return nil, fmt.Errorf("interface %s: attached twice: %w", n.PortID, core.ErrInvalidRequest)
+		}
+		seen[n.PortID] = true
+		out = append(out, core.LogicalSwitchInterface{PortID: n.PortID})
+	}
+	return out, nil
+}
+
 // Create validates, persists a PENDING instance, and asks the controller to
 // build it.
 //
@@ -302,6 +324,11 @@ func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) 
 	if flavor.RAM <= 0 {
 		return core.Instance{}, fmt.Errorf("flavor must have positive ram: %w", core.ErrInvalidRequest)
 	}
+	interfaces, err := resolveInterfaces(req.Interfaces)
+	if err != nil {
+		return core.Instance{}, err
+	}
+
 	instID := util.NewID("i")
 	attachments, err := s.resolveVolumes(ctx, instID, req)
 	if err != nil {
@@ -310,15 +337,16 @@ func (s *Instances) Create(ctx context.Context, req core.CreateInstanceRequest) 
 
 	now := time.Now().UTC()
 	inst := core.Instance{
-		ID:        instID,
-		Name:      req.Name,
-		Namespace: req.Namespace,
-		Flavor:    flavor,
-		Volumes:   attachments,
-		ImageRef:  req.ImageRef,
-		State:     core.StatePending,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         instID,
+		Name:       req.Name,
+		Namespace:  req.Namespace,
+		Flavor:     flavor,
+		Volumes:    attachments,
+		Interfaces: interfaces,
+		ImageRef:   req.ImageRef,
+		State:      core.StatePending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 	created, err := s.Store.Create(ctx, inst)
 	if err != nil {

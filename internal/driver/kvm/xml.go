@@ -84,10 +84,7 @@ func domainXML(name string, req core.CreateRequest, files, bases map[string]stri
   </os>
   <devices>
 %s
-    <interface type='network'>
-      <source network='default'/>
-      <model type='virtio'/>
-    </interface>
+%s
     <serial type='pty'>
       <target port='0'/>
     </serial>
@@ -100,7 +97,45 @@ func domainXML(name string, req core.CreateRequest, files, bases map[string]stri
     </rng>
   </devices>
 </domain>
-`, name, meta, req.Flavor.RAM*1024, v.Count(), pinning, topology, storageXML(req, files, bases))
+`, name, meta, req.Flavor.RAM*1024, v.Count(), pinning, topology, storageXML(req, files, bases), interfacesXML(req))
+}
+
+// interfacesXML renders the VM's vNICs. With no logical ports it keeps the
+// historical libvirt default network, so VMs created before OVN still boot.
+// A logical port becomes an OVS interface on br-int carrying iface-id, which
+// is what ovn-controller binds to the logical switch.
+func interfacesXML(req core.CreateRequest) string {
+	if len(req.Interfaces) == 0 {
+		return `    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>`
+	}
+	var b strings.Builder
+	for _, n := range req.Interfaces {
+		ifaceID := n.OVNLogicalPort
+		if ifaceID == "" {
+			ifaceID = n.PortID
+		}
+		bridge := n.Bridge
+		if bridge == "" {
+			bridge = "br-int"
+		}
+		vif := n.VIFType
+		if vif == "" {
+			vif = "ovs"
+		}
+		b.WriteString("\n    <interface type='bridge'>")
+		if n.MAC != "" {
+			fmt.Fprintf(&b, "\n      <mac address='%s'/>", n.MAC)
+		}
+		fmt.Fprintf(&b, "\n      <source bridge='%s'/>", bridge)
+		if vif == "ovs" {
+			fmt.Fprintf(&b, "\n      <virtualport type='openvswitch'>\n        <parameters interfaceid='%s'/>\n      </virtualport>", ifaceID)
+		}
+		b.WriteString("\n      <model type='virtio'/>\n    </interface>")
+	}
+	return strings.TrimPrefix(b.String(), "\n")
 }
 
 // volumeDir places a provisioned file next to the base it derives from:
