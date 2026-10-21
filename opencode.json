@@ -4,19 +4,19 @@
     "AGENTS.md",
     "SKILL.md"
   ],
-  "permissions": [
-    {"action": "shell", "resource": "*", "effect": "allow"},
-    {"action": "edit", "resource": "*", "effect": "allow"},
-    {"action": "webfetch", "resource": "*", "effect": "allow"}
-  ],
+  "permission": {
+    "bash": "allow",
+    "edit": "allow",
+    "webfetch": "allow"
+  },
   "mcp": {
-    "servers": {
-      "context7": {
-        "type": "remote",
-        "url": "https://mcp.context7.com/mcp",
-        "headers": { "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}" },
-        "disabled": false
-      }
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+      },
+      "enabled": true
     }
   }
 }
